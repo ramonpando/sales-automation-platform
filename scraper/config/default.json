@@ -1,0 +1,26 @@
+{
+  "app": {
+    "name": "sales-scraper",
+    "version": "1.0.0",
+    "environment": "production"
+  },
+  "server": {
+    "port": 3000,
+    "host": "0.0.0.0"
+  },
+  "scraper": {
+    "maxConcurrentRequests": 5,
+    "rateLimitDelay": 200,
+    "timeout": 30000,
+    "retryAttempts": 3,
+    "userAgent": "Mozilla/5.0 (compatible; SalesScraper/1.0)"
+  },
+  "cache": {
+    "ttl": 3600,
+    "checkPeriod": 600
+  },
+  "logging": {
+    "level": "info",
+    "format": "json"
+  }
+}
