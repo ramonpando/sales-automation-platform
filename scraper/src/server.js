@@ -1,97 +1,306 @@
-// Minimal server for debugging
+// =============================================
+// SALES SCRAPER SERVICE - MAIN SERVER
+// =============================================
 console.log('=== STARTING SALES SCRAPER SERVICE ===');
 console.log('Node version:', process.version);
-console.log('Current directory:', __dirname);
 console.log('Environment:', process.env.NODE_ENV);
 
-// Test basic imports
+// Import required modules
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const dotenv = require('dotenv');
+
+// Load environment variables
+dotenv.config();
+
+// Initialize variables for modules that might fail
+let logger, database, redis, scraperService, metricsService, healthService;
+let healthRoutes, scraperRoutes, metricsRoutes, adminRoutes;
+
+// =============================================
+// SAFE MODULE LOADING
+// =============================================
+
+// Load logger
 try {
-  const express = require('express');
-  console.log('✅ Express loaded');
+  logger = require('./utils/logger.js');
+  console.log('✅ Logger loaded successfully');
 } catch (error) {
-  console.error('❌ Error loading express:', error.message);
-  process.exit(1);
+  console.error('⚠️ Logger failed to load:', error.message);
+  // Create fallback logger
+  logger = {
+    info: (...args) => console.log('[INFO]', ...args),
+    error: (...args) => console.error('[ERROR]', ...args),
+    warn: (...args) => console.warn('[WARN]', ...args),
+    debug: (...args) => console.log('[DEBUG]', ...args)
+  };
 }
 
-// Create basic server
-const express = require('express');
+// Load database connection
+try {
+  database = require('./database/connection.js');
+  logger.info('✅ Database module loaded');
+} catch (error) {
+  logger.error('⚠️ Database module failed:', error.message);
+  database = null;
+}
+
+// Load Redis
+try {
+  redis = require('./database/redis.js');
+  logger.info('✅ Redis module loaded');
+} catch (error) {
+  logger.error('⚠️ Redis module failed:', error.message);
+  redis = null;
+}
+
+// Load services
+try {
+  scraperService = require('./services/scraperService.js');
+  logger.info('✅ Scraper service loaded');
+} catch (error) {
+  logger.error('⚠️ Scraper service failed:', error.message);
+}
+
+try {
+  metricsService = require('./services/metricsService.js');
+  logger.info('✅ Metrics service loaded');
+} catch (error) {
+  logger.error('⚠️ Metrics service failed:', error.message);
+}
+
+try {
+  healthService = require('./services/healthService.js');
+  logger.info('✅ Health service loaded');
+} catch (error) {
+  logger.error('⚠️ Health service failed:', error.message);
+}
+
+// Load routes
+try {
+  healthRoutes = require('./routes/health.js');
+  logger.info('✅ Health routes loaded');
+} catch (error) {
+  logger.error('⚠️ Health routes failed:', error.message);
+}
+
+try {
+  scraperRoutes = require('./routes/scraper.js');
+  logger.info('✅ Scraper routes loaded');
+} catch (error) {
+  logger.error('⚠️ Scraper routes failed:', error.message);
+}
+
+try {
+  metricsRoutes = require('./routes/metrics.js');
+  logger.info('✅ Metrics routes loaded');
+} catch (error) {
+  logger.error('⚠️ Metrics routes failed:', error.message);
+}
+
+try {
+  adminRoutes = require('./routes/admin.js');
+  logger.info('✅ Admin routes loaded');
+} catch (error) {
+  logger.error('⚠️ Admin routes failed:', error.message);
+}
+
+// =============================================
+// EXPRESS SETUP
+// =============================================
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('Port configured:', PORT);
-
-// Basic middleware
+// Middleware
+app.use(helmet());
+app.use(cors());
+app.use(compression());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Health endpoint
-app.get('/health', (req, res) => {
-  console.log('Health check requested');
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    pid: process.pid,
-    uptime: process.uptime(),
-    memory: process.memoryUsage(),
-    env: {
-      NODE_ENV: process.env.NODE_ENV,
-      PORT: process.env.PORT,
-      DATABASE_URL: process.env.DATABASE_URL ? 'SET' : 'NOT SET',
-      REDIS_URL: process.env.REDIS_URL ? 'SET' : 'NOT SET'
+// Request logging middleware
+app.use((req, res, next) => {
+  logger.info(`${req.method} ${req.path}`);
+  next();
+});
+
+// =============================================
+// ROUTES
+// =============================================
+
+// Basic health check (always available)
+app.get('/health', async (req, res) => {
+  try {
+    const health = {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      environment: process.env.NODE_ENV,
+      version: '1.0.0',
+      services: {
+        database: database ? 'loaded' : 'not loaded',
+        redis: redis ? 'loaded' : 'not loaded',
+        scraper: scraperService ? 'loaded' : 'not loaded'
+      }
+    };
+
+    // If healthService is available, use it for more detailed info
+    if (healthService && typeof healthService.getHealth === 'function') {
+      try {
+        const detailedHealth = await healthService.getHealth();
+        Object.assign(health, detailedHealth);
+      } catch (error) {
+        health.healthServiceError = error.message;
+      }
     }
-  });
+
+    res.json(health);
+  } catch (error) {
+    logger.error('Health check error:', error);
+    res.status(500).json({ 
+      status: 'error', 
+      message: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // Root endpoint
 app.get('/', (req, res) => {
-  console.log('Root endpoint requested');
   res.json({
-    message: 'Sales Scraper API - Debug Mode',
+    message: 'Sales Scraper API',
     version: '1.0.0',
-    status: 'running'
+    endpoints: [
+      '/health',
+      '/api/scraper',
+      '/api/metrics',
+      '/api/admin'
+    ],
+    documentation: '/api/docs'
   });
 });
 
-// Error handler
+// Mount routes if they loaded successfully
+if (healthRoutes) {
+  app.use('/api/health', healthRoutes);
+  logger.info('Health routes mounted at /api/health');
+}
+
+if (scraperRoutes) {
+  app.use('/api/scraper', scraperRoutes);
+  logger.info('Scraper routes mounted at /api/scraper');
+}
+
+if (metricsRoutes) {
+  app.use('/api/metrics', metricsRoutes);
+  logger.info('Metrics routes mounted at /api/metrics');
+}
+
+if (adminRoutes) {
+  app.use('/api/admin', adminRoutes);
+  logger.info('Admin routes mounted at /api/admin');
+}
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: `Route ${req.method} ${req.path} not found`,
+    availableEndpoints: ['/health', '/api/scraper', '/api/metrics', '/api/admin']
+  });
+});
+
+// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Express error:', err);
-  res.status(500).json({ error: err.message });
-});
-
-// Start server with explicit error handling
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server successfully started on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log('=== SERVER IS RUNNING ===');
-});
-
-// Handle server errors
-server.on('error', (error) => {
-  console.error('❌ Server error:', error);
-  process.exit(1);
-});
-
-// Keep process alive
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down...');
-  server.close(() => {
-    console.log('Server closed');
-    process.exit(0);
+  logger.error('Express error:', err);
+  res.status(500).json({
+    error: 'Internal Server Error',
+    message: err.message,
+    ...(process.env.NODE_ENV === 'development' && { stack: err.stack })
   });
 });
 
+// =============================================
+// SERVER INITIALIZATION
+// =============================================
+async function startServer() {
+  try {
+    // Initialize database if available
+    if (database && typeof database.initialize === 'function') {
+      try {
+        await database.initialize();
+        logger.info('✅ Database initialized');
+      } catch (error) {
+        logger.error('❌ Database initialization failed:', error.message);
+        // Continue anyway - the app can work without DB
+      }
+    }
+
+    // Initialize Redis if available
+    if (redis && typeof redis.connect === 'function') {
+      try {
+        await redis.connect();
+        logger.info('✅ Redis connected');
+      } catch (error) {
+        logger.error('❌ Redis connection failed:', error.message);
+        // Continue anyway - the app can work without Redis
+      }
+    }
+
+    // Start Express server
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      logger.info(`✅ Server running on port ${PORT}`);
+      logger.info(`Health check: http://localhost:${PORT}/health`);
+      logger.info('=== SERVER IS READY ===');
+    });
+
+    // Graceful shutdown
+    process.on('SIGTERM', async () => {
+      logger.info('SIGTERM received, shutting down gracefully...');
+      
+      server.close(() => {
+        logger.info('HTTP server closed');
+      });
+
+      // Close database connections
+      if (database && typeof database.close === 'function') {
+        await database.close();
+      }
+      if (redis && typeof redis.disconnect === 'function') {
+        await redis.disconnect();
+      }
+
+      process.exit(0);
+    });
+
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Handle uncaught errors
 process.on('uncaughtException', (error) => {
-  console.error('❌ Uncaught Exception:', error);
-  // Don't exit, just log
+  logger.error('Uncaught Exception:', error);
+  // Don't exit - try to keep running
 });
 
 process.on('unhandledRejection', (error) => {
-  console.error('❌ Unhandled Rejection:', error);
-  // Don't exit, just log
+  logger.error('Unhandled Rejection:', error);
+  // Don't exit - try to keep running
 });
 
-// Log every 10 seconds to show we're alive
-setInterval(() => {
-  console.log(`[${new Date().toISOString()}] Server is alive - Uptime: ${Math.floor(process.uptime())}s`);
-}, 10000);
+// Start the server
+startServer().catch(error => {
+  console.error('Fatal error starting server:', error);
+  process.exit(1);
+});
 
-console.log('=== SERVER SETUP COMPLETE ===');
+// Keep-alive logging (every 30 seconds in production)
+if (process.env.NODE_ENV === 'production') {
+  setInterval(() => {
+    logger.info(`Server alive - Uptime: ${Math.floor(process.uptime())}s`);
+  }, 30000);
+}
