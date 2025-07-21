@@ -2,16 +2,11 @@
 // SCRAPER SERVICE - MAIN SCRAPING ENGINE
 // =============================================
 
-import axios from 'axios';
-import * as cheerio from 'cheerio';
-import { RateLimiterMemory } from 'rate-limiter-flexible';
-import cron from 'node-cron';
-import { v4 as uuidv4 } from 'uuid';
-
-import logger from '../utils/logger.js';
-import database from '../database/connection.js';
-import redis from '../database/redis.js';
-import metricsService from './metricsService.js';
+const axios = require('axios');
+const cheerio = require('cheerio');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
+const cron = require('node-cron');
+const { v4: uuidv4 } = require('uuid');
 
 // =============================================
 // SCRAPER CONFIGURATION
@@ -72,7 +67,10 @@ const rateLimiter = new RateLimiterMemory({
 // =============================================
 
 class ScraperService {
-  constructor() {
+  constructor(database, redis, logger) {
+    this.database = database;
+    this.redis = redis;
+    this.logger = logger || console;
     this.isRunning = false;
     this.activeJobs = new Map();
     this.cronJobs = new Map();
@@ -90,7 +88,7 @@ class ScraperService {
 
   async initialize() {
     try {
-      logger.info('🕷️ Initializing Scraper Service...');
+      this.logger.info('🕷️ Initializing Scraper Service...');
 
       // Setup scheduled scraping if enabled
       if (config.autoStart) {
@@ -100,7 +98,7 @@ class ScraperService {
       // Load stats from database
       await this.loadStats();
 
-      logger.info('✅ Scraper Service initialized successfully', {
+      this.logger.info('✅ Scraper Service initialized successfully', {
         autoStart: config.autoStart,
         sources: Object.keys(config.sources).filter(s => config.sources[s].enabled),
         maxConcurrentRequests: config.maxConcurrentRequests,
@@ -108,7 +106,7 @@ class ScraperService {
       });
 
     } catch (error) {
-      logger.error('❌ Failed to initialize Scraper Service', {
+      this.logger.error('❌ Failed to initialize Scraper Service', {
         error: error.message,
         stack: error.stack
       });
@@ -121,16 +119,16 @@ class ScraperService {
   // =============================================
 
   scheduleAutomaticScraping() {
-    logger.info('⏰ Setting up automatic scraping schedule', {
+    this.logger.info('⏰ Setting up automatic scraping schedule', {
       schedule: config.scraperInterval
     });
 
     const job = cron.schedule(config.scraperInterval, async () => {
       if (!this.isRunning) {
-        logger.info('🤖 Starting automatic scraping session');
+        this.logger.info('🤖 Starting automatic scraping session');
         await this.startFullScraping();
       } else {
-        logger.warn('⚠️ Skipping automatic scraping - another session is running');
+        this.logger.warn('⚠️ Skipping automatic scraping - another session is running');
       }
     }, {
       scheduled: false,
@@ -154,7 +152,7 @@ class ScraperService {
     this.isRunning = true;
 
     try {
-      logger.scraper.start('full-scraping', { sessionId, options });
+      this.logger.info('Starting full scraping', { sessionId, options });
 
       // Create scraping session record
       const session = await this.createScrapingSession(sessionId, 'automatic', options);
@@ -173,7 +171,7 @@ class ScraperService {
         if (!sourceConfig.enabled) continue;
 
         try {
-          logger.info(`🎯 Starting scraping from ${sourceName}`);
+          this.logger.info(`🎯 Starting scraping from ${sourceName}`);
           
           const sourceResults = await this.scrapeSource(sourceName, sourceConfig, sessionId);
           results.sources[sourceName] = sourceResults;
@@ -183,7 +181,7 @@ class ScraperService {
           results.errors += sourceResults.errors;
 
         } catch (error) {
-          logger.scraper.error(sourceName, error);
+          this.logger.error(`Error scraping source ${sourceName}`, error);
           results.errors++;
         }
       }
@@ -196,15 +194,21 @@ class ScraperService {
       this.stats.totalLeads += results.totalLeads;
       this.stats.lastRun = new Date();
 
-      // Cache results
-      await redis.cacheScrapingSession(sessionId, results, 86400);
+      // Cache results if Redis is available
+      if (this.redis && this.redis.getClient()) {
+        await this.redis.getClient().setex(
+          `session:${sessionId}`,
+          86400,
+          JSON.stringify(results)
+        );
+      }
 
-      logger.scraper.success('full-scraping', results);
+      this.logger.info('Full scraping completed', results);
       return results;
 
     } catch (error) {
       await this.updateScrapingSession(sessionId, 'failed', { error: error.message });
-      logger.scraper.error('full-scraping', error);
+      this.logger.error('Full scraping failed', error);
       throw error;
 
     } finally {
@@ -222,16 +226,10 @@ class ScraperService {
       categories: {}
     };
 
-    // Check rate limit
-    const rateCheck = await redis.checkRateLimit(sourceName, sourceConfig.rateLimit, 3600);
-    if (!rateCheck.allowed) {
-      throw new Error(`Rate limit exceeded for ${sourceName}. Remaining: ${rateCheck.remaining}`);
-    }
-
     // Scrape each category
     for (const category of sourceConfig.categories) {
       try {
-        logger.info(`📂 Scraping category: ${category} from ${sourceName}`);
+        this.logger.info(`📂 Scraping category: ${category} from ${sourceName}`);
         
         const categoryResults = await this.scrapeCategory(sourceName, sourceConfig, category, sessionId);
         results.categories[category] = categoryResults;
@@ -243,7 +241,7 @@ class ScraperService {
         await this.delay(config.rateLimitDelay * 2);
 
       } catch (error) {
-        logger.error(`❌ Error scraping category ${category} from ${sourceName}`, {
+        this.logger.error(`❌ Error scraping category ${category} from ${sourceName}`, {
           error: error.message,
           category,
           source: sourceName
@@ -269,7 +267,7 @@ class ScraperService {
 
     while (hasMorePages && page <= 10) { // Limit to 10 pages per category
       try {
-        logger.info(`📄 Scraping page ${page} of ${category} from ${sourceName}`);
+        this.logger.info(`📄 Scraping page ${page} of ${category} from ${sourceName}`);
 
         const pageResults = await this.scrapePage(sourceName, sourceConfig, category, page, sessionId);
         
@@ -286,7 +284,7 @@ class ScraperService {
               results.duplicates++;
             }
           } catch (error) {
-            logger.error('Error saving lead', { lead, error: error.message });
+            this.logger.error('Error saving lead', { lead, error: error.message });
           }
         }
 
@@ -298,7 +296,7 @@ class ScraperService {
         await this.delay(config.rateLimitDelay);
 
       } catch (error) {
-        logger.error(`❌ Error scraping page ${page} of ${category}`, {
+        this.logger.error(`❌ Error scraping page ${page} of ${category}`, {
           error: error.message,
           page,
           category,
@@ -315,12 +313,6 @@ class ScraperService {
     const url = this.buildSearchUrl(sourceConfig, category, page);
     
     try {
-      // Check if URL was already scraped recently
-      if (await redis.isUrlScraped(url)) {
-        logger.debug('⏭️ Skipping already scraped URL', { url });
-        return { leads: [], hasNextPage: false };
-      }
-
       // Apply rate limiting
       await rateLimiter.consume({ source: sourceName });
 
@@ -333,14 +325,8 @@ class ScraperService {
       // Check for next page
       const hasNextPage = this.hasNextPage(response.data, sourceName);
 
-      // Mark URL as scraped
-      await redis.markUrlAsScraped(url, {
-        leadsFound: leads.length,
-        scrapedAt: new Date().toISOString(),
-        sessionId
-      });
-
-      logger.scraper.page(url, {
+      this.logger.info(`Page scraped`, {
+        url,
         leadsFound: leads.length,
         hasNextPage,
         category,
@@ -350,7 +336,7 @@ class ScraperService {
       return { leads, hasNextPage };
 
     } catch (error) {
-      logger.error('❌ Error scraping page', {
+      this.logger.error('❌ Error scraping page', {
         url,
         error: error.message,
         source: sourceName,
@@ -381,18 +367,12 @@ class ScraperService {
           'Upgrade-Insecure-Requests': '1'
         }
       });
-
-      // Update metrics
-      metricsService.recordRequest('scraper', source, 'success');
       
       return response;
 
     } catch (error) {
-      // Update metrics
-      metricsService.recordRequest('scraper', source, 'error');
-
       if (retries < config.maxRetries) {
-        logger.warn(`🔄 Retrying request (${retries + 1}/${config.maxRetries})`, {
+        this.logger.warn(`🔄 Retrying request (${retries + 1}/${config.maxRetries})`, {
           url,
           error: error.message
         });
@@ -423,13 +403,13 @@ class ScraperService {
           leads.push(...this.parseSeccionAmarilla($, url));
           break;
         default:
-          logger.warn('🤷 Unknown source for parsing', { source });
+          this.logger.warn('🤷 Unknown source for parsing', { source });
       }
 
       return leads;
 
     } catch (error) {
-      logger.error('❌ Error parsing leads', {
+      this.logger.error('❌ Error parsing leads', {
         source,
         url,
         error: error.message
@@ -456,11 +436,11 @@ class ScraperService {
 
         if (lead.company_name && (lead.phone || lead.address)) {
           leads.push(lead);
-          logger.scraper.lead(lead, 'paginasAmarillas');
+          this.logger.debug('Lead found', lead);
         }
 
       } catch (error) {
-        logger.error('Error parsing individual lead', { error: error.message });
+        this.logger.error('Error parsing individual lead', { error: error.message });
       }
     });
 
@@ -485,11 +465,11 @@ class ScraperService {
 
         if (lead.company_name && (lead.phone || lead.address)) {
           leads.push(lead);
-          logger.scraper.lead(lead, 'seccionAmarilla');
+          this.logger.debug('Lead found', lead);
         }
 
       } catch (error) {
-        logger.error('Error parsing individual lead', { error: error.message });
+        this.logger.error('Error parsing individual lead', { error: error.message });
       }
     });
 
@@ -555,7 +535,7 @@ class ScraperService {
       const isDuplicate = await this.checkDuplicate(leadData.company_name, leadData.phone);
       
       if (isDuplicate) {
-        logger.scraper.duplicate(leadData, 'database');
+        this.logger.debug('Duplicate lead found', leadData);
         return { isNew: false, reason: 'database_duplicate' };
       }
 
@@ -570,32 +550,29 @@ class ScraperService {
       };
 
       // Insert into database
-      const result = await database.query(`
-        INSERT INTO scraper.leads (
-          company_name, phone, email, website, address, location, 
-          category, source, source_url, confidence_score, 
-          validation_status, status
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        RETURNING id, uuid
-      `, [
-        lead.company_name, lead.phone, lead.email, lead.website, 
-        lead.address, lead.location, lead.category, lead.source, 
-        lead.source_url, lead.confidence_score, lead.validation_status, lead.status
-      ]);
+      if (this.database && this.database.pool) {
+        const result = await this.database.query(`
+          INSERT INTO scraping_results (
+            job_id, source, business_name, phone, email, website, address, category, raw_data
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING id
+        `, [
+          sessionId, source, lead.company_name, lead.phone, lead.email, 
+          lead.website, lead.address, lead.category, JSON.stringify(lead)
+        ]);
 
-      // Mark as processed to avoid duplicates
-      await redis.markAsDuplicate(leadData.company_name, leadData.phone);
+        this.logger.debug('💾 Lead saved to database', {
+          id: result.rows[0].id,
+          company: lead.company_name
+        });
 
-      logger.debug('💾 Lead saved to database', {
-        id: result.rows[0].id,
-        uuid: result.rows[0].uuid,
-        company: lead.company_name
-      });
+        return { isNew: true, id: result.rows[0].id };
+      }
 
-      return { isNew: true, id: result.rows[0].id, uuid: result.rows[0].uuid };
+      return { isNew: true };
 
     } catch (error) {
-      logger.error('❌ Error saving lead', {
+      this.logger.error('❌ Error saving lead', {
         lead: leadData,
         error: error.message
       });
@@ -604,18 +581,20 @@ class ScraperService {
   }
 
   async checkDuplicate(companyName, phone) {
-    // Check Redis cache first
-    const cacheResult = await redis.checkDuplicate(companyName, phone);
-    if (cacheResult) return true;
+    if (!this.database || !this.database.pool) return false;
 
-    // Check database
-    const result = await database.query(`
-      SELECT id FROM scraper.leads 
-      WHERE company_name = $1 AND phone = $2
-      LIMIT 1
-    `, [companyName, phone]);
+    try {
+      const result = await this.database.query(`
+        SELECT id FROM scraping_results 
+        WHERE business_name = $1 AND phone = $2
+        LIMIT 1
+      `, [companyName, phone]);
 
-    return result.rows.length > 0;
+      return result.rows.length > 0;
+    } catch (error) {
+      this.logger.error('Error checking duplicate', error);
+      return false;
+    }
   }
 
   calculateConfidenceScore(lead) {
@@ -635,33 +614,63 @@ class ScraperService {
   // =============================================
 
   async createScrapingSession(sessionId, type, options) {
-    const result = await database.query(`
-      INSERT INTO scraper.scraping_sessions (
-        uuid, session_type, status, target_url
-      ) VALUES ($1, $2, $3, $4)
-      RETURNING id
-    `, [sessionId, type, 'running', JSON.stringify(options)]);
+    if (!this.database || !this.database.pool) return { id: sessionId };
 
-    return result.rows[0];
+    try {
+      // Create sessions table if not exists
+      await this.database.query(`
+        CREATE TABLE IF NOT EXISTS scraping_sessions (
+          id SERIAL PRIMARY KEY,
+          uuid VARCHAR(255) UNIQUE NOT NULL,
+          session_type VARCHAR(50),
+          status VARCHAR(50),
+          target_url TEXT,
+          started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          completed_at TIMESTAMP,
+          duration_seconds INTEGER,
+          final_stats JSONB
+        )
+      `);
+
+      const result = await this.database.query(`
+        INSERT INTO scraping_sessions (
+          uuid, session_type, status, target_url
+        ) VALUES ($1, $2, $3, $4)
+        RETURNING id
+      `, [sessionId, type, 'running', JSON.stringify(options)]);
+
+      return result.rows[0];
+    } catch (error) {
+      this.logger.error('Error creating session', error);
+      return { id: sessionId };
+    }
   }
 
   async updateScrapingSession(sessionId, status, stats = {}) {
-    await database.query(`
-      UPDATE scraper.scraping_sessions 
-      SET status = $1, final_stats = $2, completed_at = NOW(),
-          duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
-      WHERE uuid = $3
-    `, [status, JSON.stringify(stats), sessionId]);
+    if (!this.database || !this.database.pool) return;
+
+    try {
+      await this.database.query(`
+        UPDATE scraping_sessions 
+        SET status = $1, final_stats = $2, completed_at = NOW(),
+            duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at))
+        WHERE uuid = $3
+      `, [status, JSON.stringify(stats), sessionId]);
+    } catch (error) {
+      this.logger.error('Error updating session', error);
+    }
   }
 
   async loadStats() {
+    if (!this.database || !this.database.pool) return;
+
     try {
-      const result = await database.query(`
+      const result = await this.database.query(`
         SELECT 
           COUNT(*) as total_sessions,
           SUM(COALESCE((final_stats->>'totalLeads')::int, 0)) as total_leads,
           MAX(completed_at) as last_run
-        FROM scraper.scraping_sessions
+        FROM scraping_sessions
         WHERE status = 'completed'
       `);
 
@@ -674,7 +683,7 @@ class ScraperService {
         };
       }
     } catch (error) {
-      logger.error('Error loading stats', { error: error.message });
+      this.logger.error('Error loading stats', { error: error.message });
     }
   }
 
@@ -695,18 +704,46 @@ class ScraperService {
   }
 
   async stop() {
-    logger.info('🛑 Stopping Scraper Service...');
+    this.logger.info('🛑 Stopping Scraper Service...');
     
     // Stop cron jobs
     for (const [name, job] of this.cronJobs) {
       job.destroy();
-      logger.info(`⏰ Stopped cron job: ${name}`);
+      this.logger.info(`⏰ Stopped cron job: ${name}`);
     }
     
     this.cronJobs.clear();
     this.isRunning = false;
     
-    logger.info('✅ Scraper Service stopped');
+    this.logger.info('✅ Scraper Service stopped');
+  }
+
+  // Method from simplified version for compatibility
+  async startScraping(config) {
+    return this.startFullScraping(config);
+  }
+
+  getAvailableScrapers() {
+    const scrapers = [];
+    for (const [key, scraper] of Object.entries(config.sources)) {
+      if (scraper.enabled) {
+        scrapers.push({
+          id: key,
+          name: key === 'paginasAmarillas' ? 'Páginas Amarillas' : 'Sección Amarilla',
+          enabled: scraper.enabled,
+          hasEmail: key === 'paginasAmarillas'
+        });
+      }
+    }
+    return scrapers;
+  }
+
+  async getJobStatus(jobId) {
+    if (this.redis && this.redis.getClient()) {
+      const data = await this.redis.getClient().get(`session:${jobId}`);
+      return data ? JSON.parse(data) : null;
+    }
+    return null;
   }
 }
 
@@ -714,5 +751,14 @@ class ScraperService {
 // SINGLETON EXPORT
 // =============================================
 
-const scraperService = new ScraperService();
-export default scraperService;
+let instance = null;
+
+module.exports = {
+  initialize: (database, redis, logger) => {
+    if (!instance) {
+      instance = new ScraperService(database, redis, logger);
+    }
+    return instance;
+  },
+  getInstance: () => instance
+};
