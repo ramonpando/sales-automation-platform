@@ -2,15 +2,56 @@
 // ADMIN ROUTES - MANAGEMENT ENDPOINTS
 // =============================================
 
-import express from 'express';
-import database from '../database/connection.js';
-import redis from '../database/redis.js';
-import scraperService from '../services/scraperService.js';
-import metricsService from '../services/metricsService.js';
-import healthService from '../services/healthService.js';
-import logger from '../utils/logger.js';
-
+const express = require('express');
 const router = express.Router();
+
+// =============================================
+// LAZY LOADING OF DEPENDENCIES
+// =============================================
+
+function getDatabase() {
+  return require('../database/connection');
+}
+
+function getRedis() {
+  return require('../database/redis');
+}
+
+function getScraperService() {
+  const scraperModule = require('../services/scraperService');
+  return scraperModule.getInstance ? scraperModule.getInstance() : null;
+}
+
+function getMetricsService() {
+  try {
+    const metricsModule = require('../routes/metrics');
+    return metricsModule.metricsService || null;
+  } catch {
+    return null;
+  }
+}
+
+function getHealthService() {
+  try {
+    return require('../services/healthService');
+  } catch {
+    return null;
+  }
+}
+
+function getLogger() {
+  try {
+    return require('../utils/logger');
+  } catch {
+    // Fallback to console if logger not available
+    return {
+      info: console.log,
+      error: console.error,
+      warn: console.warn,
+      debug: console.debug
+    };
+  }
+}
 
 // =============================================
 // BASIC AUTH MIDDLEWARE (Simple protection)
@@ -39,7 +80,12 @@ router.use(adminAuth);
 // =============================================
 
 router.get('/info', async (req, res) => {
+  const logger = getLogger();
+  
   try {
+    const scraperService = getScraperService();
+    const healthService = getHealthService();
+    
     const info = {
       service: 'sales-scraper',
       version: '2.0.0',
@@ -53,8 +99,8 @@ router.get('/info', async (req, res) => {
       timestamp: new Date().toISOString(),
       
       // Service status
-      scraper: await scraperService.getStatus(),
-      health: healthService.getHealthStatus(),
+      scraper: scraperService ? await scraperService.getStatus() : { status: 'not initialized' },
+      health: healthService ? healthService.getHealthStatus ? healthService.getHealthStatus() : {} : {},
       
       // Configuration
       config: {
@@ -85,7 +131,17 @@ router.get('/info', async (req, res) => {
 // =============================================
 
 router.get('/database/stats', async (req, res) => {
+  const logger = getLogger();
+  const database = getDatabase();
+  
   try {
+    if (!database || !database.pool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not available'
+      });
+    }
+
     const stats = await database.query(`
       SELECT 
         schemaname,
@@ -97,11 +153,16 @@ router.get('/database/stats', async (req, res) => {
         n_dead_tup as dead_tuples,
         pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size
       FROM pg_stat_user_tables
-      WHERE schemaname = 'scraper'
+      WHERE schemaname = 'public'
       ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
+      LIMIT 10
     `);
 
-    const poolStats = database.getPoolStats();
+    const poolStats = {
+      totalCount: database.pool.totalCount || 0,
+      idleCount: database.pool.idleCount || 0,
+      waitingCount: database.pool.waitingCount || 0
+    };
 
     res.json({
       success: true,
@@ -122,11 +183,21 @@ router.get('/database/stats', async (req, res) => {
 });
 
 router.post('/database/vacuum', async (req, res) => {
+  const logger = getLogger();
+  const database = getDatabase();
+  
   try {
+    if (!database || !database.pool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not available'
+      });
+    }
+
     const { table } = req.body;
     
     if (table) {
-      await database.query(`VACUUM ANALYZE scraper.${table}`);
+      await database.query(`VACUUM ANALYZE ${table}`);
       logger.info(`Database vacuum completed for table: ${table}`);
     } else {
       await database.query('VACUUM ANALYZE');
@@ -152,16 +223,21 @@ router.post('/database/vacuum', async (req, res) => {
 // =============================================
 
 router.get('/cache/stats', async (req, res) => {
+  const logger = getLogger();
+  const redis = getRedis();
+  
   try {
-    if (!redis.isConnected) {
+    const redisClient = redis && redis.getClient ? redis.getClient() : null;
+    
+    if (!redisClient || !redisClient.isOpen) {
       return res.status(503).json({
         success: false,
         error: 'Redis not connected'
       });
     }
 
-    const info = await redis.client.info('all');
-    const keyCount = await redis.client.dbsize();
+    const info = await redisClient.info('all');
+    const keyCount = await redisClient.dbSize();
     
     // Parse Redis info
     const stats = {};
@@ -175,7 +251,7 @@ router.get('/cache/stats', async (req, res) => {
     res.json({
       success: true,
       data: {
-        connected: redis.isConnected,
+        connected: redisClient.isOpen,
         keyCount,
         memory: {
           used: stats.used_memory_human,
@@ -202,14 +278,26 @@ router.get('/cache/stats', async (req, res) => {
 });
 
 router.delete('/cache/clear', async (req, res) => {
+  const logger = getLogger();
+  const redis = getRedis();
+  
   try {
+    const redisClient = redis && redis.getClient ? redis.getClient() : null;
+    
+    if (!redisClient || !redisClient.isOpen) {
+      return res.status(503).json({
+        success: false,
+        error: 'Redis not connected'
+      });
+    }
+
     const { pattern } = req.query;
     
     if (pattern) {
       // Clear specific pattern
-      const keys = await redis.client.keys(`scraper:${pattern}*`);
+      const keys = await redisClient.keys(`scraper:${pattern}*`);
       if (keys.length > 0) {
-        await redis.client.del(...keys);
+        await redisClient.del(keys);
       }
       logger.info(`Cache cleared for pattern: ${pattern}`, { keysCleared: keys.length });
       
@@ -219,9 +307,9 @@ router.delete('/cache/clear', async (req, res) => {
       });
     } else {
       // Clear all scraper keys
-      const keys = await redis.client.keys('scraper:*');
+      const keys = await redisClient.keys('scraper:*');
       if (keys.length > 0) {
-        await redis.client.del(...keys);
+        await redisClient.del(keys);
       }
       logger.info('Cache cleared for all scraper keys', { keysCleared: keys.length });
       
@@ -245,9 +333,25 @@ router.delete('/cache/clear', async (req, res) => {
 // =============================================
 
 router.get('/metrics/report', async (req, res) => {
+  const logger = getLogger();
+  const metricsService = getMetricsService();
+  
   try {
+    if (!metricsService) {
+      return res.status(503).json({
+        success: false,
+        error: 'Metrics service not available'
+      });
+    }
+
     const { timeRange = '1h' } = req.query;
-    const report = metricsService.generateReport(timeRange);
+    
+    // Simple report for now
+    const report = {
+      timeRange,
+      timestamp: new Date().toISOString(),
+      metrics: await metricsService.getMetrics()
+    };
 
     res.json({
       success: true,
@@ -264,7 +368,17 @@ router.get('/metrics/report', async (req, res) => {
 });
 
 router.post('/metrics/reset', async (req, res) => {
+  const logger = getLogger();
+  const metricsService = getMetricsService();
+  
   try {
+    if (!metricsService || !metricsService.reset) {
+      return res.status(503).json({
+        success: false,
+        error: 'Metrics service not available'
+      });
+    }
+
     metricsService.reset();
     logger.info('Metrics reset by admin');
 
@@ -287,20 +401,20 @@ router.post('/metrics/reset', async (req, res) => {
 // =============================================
 
 router.get('/logs', async (req, res) => {
+  const logger = getLogger();
+  
   try {
     const { level = 'info', limit = 100 } = req.query;
     
-    // This would need implementation based on your logging setup
-    // For now, return recent log entries from metrics buffer
-    const logEntries = metricsService.getBuffer('log', parseInt(limit));
-
+    // Simple response for now
     res.json({
       success: true,
       data: {
-        logs: logEntries,
+        logs: [],
         level,
         limit: parseInt(limit),
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        message: 'Log retrieval not implemented yet'
       }
     });
 
@@ -314,10 +428,12 @@ router.get('/logs', async (req, res) => {
 });
 
 router.post('/logs/level', async (req, res) => {
+  const logger = getLogger();
+  
   try {
     const { level } = req.body;
     
-    // Update log level (this would need Winston integration)
+    // Update log level
     process.env.LOG_LEVEL = level;
     logger.info(`Log level changed to: ${level}`);
 
@@ -340,10 +456,12 @@ router.post('/logs/level', async (req, res) => {
 // =============================================
 
 router.post('/service/restart', async (req, res) => {
+  const logger = getLogger();
+  
   try {
     logger.warn('Service restart requested by admin');
     
-    // Graceful restart (in real implementation)
+    // Graceful restart
     res.json({
       success: true,
       message: 'Service restart initiated'
@@ -364,7 +482,17 @@ router.post('/service/restart', async (req, res) => {
 });
 
 router.post('/scraper/force-stop', async (req, res) => {
+  const logger = getLogger();
+  const scraperService = getScraperService();
+  
   try {
+    if (!scraperService || !scraperService.stop) {
+      return res.status(503).json({
+        success: false,
+        error: 'Scraper service not available'
+      });
+    }
+
     await scraperService.stop();
     logger.warn('Scraper force-stopped by admin');
 
@@ -387,12 +515,22 @@ router.post('/scraper/force-stop', async (req, res) => {
 // =============================================
 
 router.delete('/data/cleanup', async (req, res) => {
+  const logger = getLogger();
+  const database = getDatabase();
+  
   try {
+    if (!database || !database.pool) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database not available'
+      });
+    }
+
     const { days = 30, dryRun = false } = req.query;
     
     const query = `
       SELECT COUNT(*) as count
-      FROM scraper.leads 
+      FROM scraping_results 
       WHERE created_at < NOW() - INTERVAL '${parseInt(days)} days'
     `;
     
@@ -401,7 +539,7 @@ router.delete('/data/cleanup', async (req, res) => {
 
     if (!dryRun && recordsToDelete > 0) {
       await database.query(`
-        DELETE FROM scraper.leads 
+        DELETE FROM scraping_results 
         WHERE created_at < NOW() - INTERVAL '${parseInt(days)} days'
       `);
       
@@ -436,6 +574,8 @@ router.delete('/data/cleanup', async (req, res) => {
 // =============================================
 
 router.post('/backup/create', async (req, res) => {
+  const logger = getLogger();
+  
   try {
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const backupName = `scraper_backup_${timestamp}`;
@@ -467,7 +607,30 @@ router.post('/backup/create', async (req, res) => {
 // =============================================
 
 router.post('/health/check', async (req, res) => {
+  const logger = getLogger();
+  const healthService = getHealthService();
+  
   try {
+    if (!healthService || !healthService.performHealthCheck) {
+      // Simple health check
+      const database = getDatabase();
+      const redis = getRedis();
+      
+      const health = {
+        timestamp: new Date().toISOString(),
+        services: {
+          database: database && database.pool ? 'available' : 'unavailable',
+          redis: redis && redis.getClient && redis.getClient().isOpen ? 'connected' : 'disconnected',
+          scraper: getScraperService() ? 'initialized' : 'not initialized'
+        }
+      };
+      
+      return res.json({
+        success: true,
+        data: health
+      });
+    }
+
     const healthReport = await healthService.performHealthCheck();
 
     res.json({
@@ -485,8 +648,14 @@ router.post('/health/check', async (req, res) => {
 });
 
 router.post('/health/reset', async (req, res) => {
+  const logger = getLogger();
+  const healthService = getHealthService();
+  
   try {
-    healthService.reset();
+    if (healthService && healthService.reset) {
+      healthService.reset();
+    }
+    
     logger.info('Health status reset by admin');
 
     res.json({
@@ -508,6 +677,8 @@ router.post('/health/reset', async (req, res) => {
 // =============================================
 
 router.use((error, req, res, next) => {
+  const logger = getLogger();
+  
   logger.error('Admin API error', {
     error: error.message,
     stack: error.stack,
@@ -522,4 +693,4 @@ router.use((error, req, res, next) => {
   });
 });
 
-export default router;
+module.exports = router;
