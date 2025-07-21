@@ -2,11 +2,8 @@
 // METRICS ROUTES - PROMETHEUS COMPATIBLE
 // =============================================
 
-import express from 'express';
-import client from 'prom-client';
-import database from '../database/connection.js';
-import redis from '../database/redis.js';
-import scraperService from '../services/scraperService.js';
+const express = require('express');
+const client = require('prom-client');
 
 const router = express.Router();
 
@@ -114,6 +111,24 @@ const systemInfo = new client.Gauge({
 });
 
 // =============================================
+// LAZY LOADING OF DEPENDENCIES
+// =============================================
+
+// Lazy load dependencies to avoid circular imports
+function getDatabase() {
+  return require('../database/connection');
+}
+
+function getRedis() {
+  return require('../database/redis');
+}
+
+function getScraperService() {
+  const scraperModule = require('../services/scraperService');
+  return scraperModule.getInstance ? scraperModule.getInstance() : null;
+}
+
+// =============================================
 // METRICS ENDPOINTS
 // =============================================
 
@@ -179,34 +194,44 @@ router.get('/database', async (req, res) => {
 
 async function updateDynamicMetrics() {
   try {
+    const database = getDatabase();
+    const redis = getRedis();
+
     // Update database connection metrics
-    const poolStats = database.getPoolStats();
-    if (poolStats) {
-      databaseConnections.set({ type: 'total' }, poolStats.totalCount);
-      databaseConnections.set({ type: 'idle' }, poolStats.idleCount);
-      databaseConnections.set({ type: 'waiting' }, poolStats.waitingCount);
+    if (database && database.pool) {
+      const poolStats = database.pool;
+      databaseConnections.set({ type: 'total' }, poolStats.totalCount || 0);
+      databaseConnections.set({ type: 'idle' }, poolStats.idleCount || 0);
+      databaseConnections.set({ type: 'waiting' }, poolStats.waitingCount || 0);
     }
 
     // Update Redis connection status
-    redisConnected.set(redis.isConnected ? 1 : 0);
+    const redisClient = redis && redis.getClient ? redis.getClient() : null;
+    redisConnected.set(redisClient && redisClient.isOpen ? 1 : 0);
 
     // Update current leads count
-    const leadsStats = await database.query(`
-      SELECT 
-        source,
-        status,
-        COUNT(*) as count
-      FROM scraper.leads
-      GROUP BY source, status
-    `);
+    if (database && database.pool) {
+      try {
+        const leadsStats = await database.query(`
+          SELECT 
+            source,
+            status,
+            COUNT(*) as count
+          FROM scraping_results
+          GROUP BY source, status
+        `);
 
-    // Reset gauges and set new values
-    leadsCurrentTotal.reset();
-    for (const row of leadsStats.rows) {
-      leadsCurrentTotal.set(
-        { source: row.source, status: row.status },
-        parseInt(row.count)
-      );
+        // Reset gauges and set new values
+        leadsCurrentTotal.reset();
+        for (const row of leadsStats.rows) {
+          leadsCurrentTotal.set(
+            { source: row.source || 'unknown', status: row.status || 'unknown' },
+            parseInt(row.count)
+          );
+        }
+      } catch (error) {
+        console.error('Error updating leads metrics:', error);
+      }
     }
 
     // Update system info
@@ -237,17 +262,50 @@ async function collectHealthMetrics() {
   };
 
   try {
+    const database = getDatabase();
+    const redis = getRedis();
+    const scraperService = getScraperService();
+
     // Database health
-    const dbHealth = await database.healthCheck();
-    metrics.database = dbHealth;
+    if (database && database.pool) {
+      try {
+        const result = await database.query('SELECT NOW()');
+        metrics.database = {
+          status: 'connected',
+          timestamp: result.rows[0].now
+        };
+      } catch (error) {
+        metrics.database = {
+          status: 'error',
+          error: error.message
+        };
+      }
+    } else {
+      metrics.database = { status: 'not configured' };
+    }
 
     // Redis health
-    const redisHealth = await redis.healthCheck();
-    metrics.cache = redisHealth;
+    const redisClient = redis && redis.getClient ? redis.getClient() : null;
+    if (redisClient) {
+      try {
+        await redisClient.ping();
+        metrics.cache = { status: 'connected' };
+      } catch (error) {
+        metrics.cache = {
+          status: 'error',
+          error: error.message
+        };
+      }
+    } else {
+      metrics.cache = { status: 'not configured' };
+    }
 
     // Scraper status
-    const scraperStatus = await scraperService.getStatus();
-    metrics.scraper = scraperStatus;
+    if (scraperService) {
+      metrics.scraper = await scraperService.getStatus();
+    } else {
+      metrics.scraper = { status: 'not initialized' };
+    }
 
   } catch (error) {
     metrics.error = error.message;
@@ -258,18 +316,25 @@ async function collectHealthMetrics() {
 
 async function collectScraperMetrics() {
   try {
+    const database = getDatabase();
+    
+    if (!database || !database.pool) {
+      return {
+        error: 'Database not available',
+        timestamp: new Date().toISOString()
+      };
+    }
+
     const stats = await database.query(`
       SELECT 
         source,
         COUNT(*) as total_leads,
         COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours') as leads_today,
         COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') as leads_week,
-        COUNT(*) FILTER (WHERE status = 'new') as new_leads,
         COUNT(*) FILTER (WHERE phone IS NOT NULL) as leads_with_phone,
         COUNT(*) FILTER (WHERE email IS NOT NULL) as leads_with_email,
-        AVG(confidence_score) as avg_confidence,
         MAX(created_at) as last_scrape
-      FROM scraper.leads
+      FROM scraping_results
       GROUP BY source
     `);
 
@@ -280,7 +345,8 @@ async function collectScraperMetrics() {
         AVG(duration_seconds) as avg_duration,
         MIN(started_at) as first_session,
         MAX(completed_at) as last_session
-      FROM scraper.scraping_sessions
+      FROM scraping_sessions
+      WHERE uuid IS NOT NULL
       GROUP BY status
     `);
 
@@ -312,8 +378,20 @@ async function collectScraperMetrics() {
 
 async function collectDatabaseMetrics() {
   try {
-    const poolStats = database.getPoolStats();
-    const dbHealth = await database.healthCheck();
+    const database = getDatabase();
+    
+    if (!database || !database.pool) {
+      return {
+        error: 'Database not available',
+        timestamp: new Date().toISOString()
+      };
+    }
+
+    const poolStats = {
+      totalCount: database.pool.totalCount || 0,
+      idleCount: database.pool.idleCount || 0,
+      waitingCount: database.pool.waitingCount || 0
+    };
 
     // Get table sizes
     const tableSizes = await database.query(`
@@ -323,19 +401,20 @@ async function collectDatabaseMetrics() {
         pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) AS size,
         pg_total_relation_size(schemaname||'.'||tablename) AS size_bytes
       FROM pg_tables 
-      WHERE schemaname = 'scraper'
+      WHERE schemaname = 'public'
       ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
+      LIMIT 10
     `);
 
     return {
       timestamp: new Date().toISOString(),
       connection: {
-        status: dbHealth.status,
+        status: 'connected',
         pool: poolStats
       },
       tables: tableSizes.rows,
       performance: {
-        responseTime: dbHealth.responseTime
+        responseTime: 'N/A'
       }
     };
 
@@ -352,7 +431,7 @@ async function collectDatabaseMetrics() {
 // =============================================
 
 // Export functions for use in other modules
-export const metricsService = {
+const metricsService = {
   // Record HTTP request
   recordRequest: (method, route, statusCode, duration) => {
     httpRequestsTotal.inc({ method, route, status_code: statusCode });
@@ -395,4 +474,6 @@ export const metricsService = {
   reset: () => register.clear()
 };
 
-export default router;
+// Export both router and service
+module.exports = router;
+module.exports.metricsService = metricsService;
