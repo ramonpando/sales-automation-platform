@@ -2,18 +2,61 @@
 // HEALTH SERVICE - SYSTEM HEALTH MONITORING
 // =============================================
 
-import logger from '../utils/logger.js';
-import database from '../database/connection.js';
-import redis from '../database/redis.js';
-
 class HealthService {
   constructor() {
     this.healthChecks = new Map();
-    this.healthHistory = [];
-    this.isInitialized = false;
-    this.healthCheckInterval = null;
     this.healthStatus = 'unknown';
     this.lastHealthCheck = null;
+    this.healthHistory = [];
+    this.healthCheckInterval = null;
+    this.isInitialized = false;
+    
+    // Dependencies
+    this.logger = null;
+    this.database = null;
+    this.redis = null;
+  }
+
+  // =============================================
+  // LAZY LOADING OF DEPENDENCIES
+  // =============================================
+
+  getLogger() {
+    if (!this.logger) {
+      try {
+        this.logger = require('../utils/logger');
+      } catch {
+        this.logger = {
+          info: console.log,
+          error: console.error,
+          warn: console.warn,
+          debug: console.debug
+        };
+      }
+    }
+    return this.logger;
+  }
+
+  getDatabase() {
+    if (!this.database) {
+      try {
+        this.database = require('../database/connection');
+      } catch {
+        this.database = null;
+      }
+    }
+    return this.database;
+  }
+
+  getRedis() {
+    if (!this.redis) {
+      try {
+        this.redis = require('../database/redis');
+      } catch {
+        this.redis = null;
+      }
+    }
+    return this.redis;
   }
 
   // =============================================
@@ -21,17 +64,19 @@ class HealthService {
   // =============================================
 
   async initialize() {
+    const logger = this.getLogger();
+    
     try {
       logger.info('🏥 Initializing Health Service...');
 
-      // Register health checks
-      this.registerHealthChecks();
+      // Register default health checks
+      this.registerDefaultHealthChecks();
+
+      // Start periodic health checks
+      this.startPeriodicHealthChecks();
 
       // Perform initial health check
       await this.performHealthCheck();
-
-      // Start periodic health checks (every 30 seconds)
-      this.startPeriodicHealthChecks();
 
       this.isInitialized = true;
       logger.info('✅ Health Service initialized successfully');
@@ -46,163 +91,163 @@ class HealthService {
   }
 
   // =============================================
-  // HEALTH CHECK REGISTRATION
+  // DEFAULT HEALTH CHECKS
   // =============================================
 
-  registerHealthChecks() {
+  registerDefaultHealthChecks() {
+    const logger = this.getLogger();
+
     // Database health check
-    this.healthChecks.set('database', {
+    this.addHealthCheck('database', {
       name: 'PostgreSQL Database',
       critical: true,
       timeout: 5000,
       check: async () => {
-        const start = Date.now();
+        const database = this.getDatabase();
+        
+        if (!database || !database.pool) {
+          return {
+            status: 'unhealthy',
+            message: 'Database not configured'
+          };
+        }
+
         try {
-          const result = await database.query('SELECT NOW() as current_time, version() as version');
-          const duration = Date.now() - start;
-          
+          const start = Date.now();
+          const result = await database.query('SELECT NOW()');
+          const responseTime = Date.now() - start;
+
           return {
             status: 'healthy',
-            responseTime: `${duration}ms`,
+            message: 'Database responding',
             details: {
-              currentTime: result.rows[0].current_time,
-              version: result.rows[0].version.split(' ')[0],
-              poolStats: database.getPoolStats()
+              responseTime: `${responseTime}ms`,
+              timestamp: result.rows[0].now
             }
           };
         } catch (error) {
           return {
             status: 'unhealthy',
-            error: error.message,
-            responseTime: `${Date.now() - start}ms`
+            message: 'Database query failed',
+            error: error.message
           };
         }
       }
     });
 
     // Redis health check
-    this.healthChecks.set('redis', {
+    this.addHealthCheck('redis', {
       name: 'Redis Cache',
       critical: false,
       timeout: 3000,
       check: async () => {
-        const start = Date.now();
+        const redis = this.getRedis();
+        const redisClient = redis && redis.getClient ? redis.getClient() : null;
+        
+        if (!redisClient) {
+          return {
+            status: 'unhealthy',
+            message: 'Redis not configured'
+          };
+        }
+
         try {
-          if (!redis.isConnected) {
+          const start = Date.now();
+          
+          if (!redisClient.isOpen) {
             return {
-              status: 'disconnected',
-              error: 'Redis client not connected'
+              status: 'unhealthy',
+              message: 'Redis not connected'
             };
           }
-
-          await redis.client.ping();
-          const duration = Date.now() - start;
           
-          const info = await redis.client.info('memory');
-          const memoryMatch = info.match(/used_memory_human:(.+)/);
-          const memoryUsed = memoryMatch ? memoryMatch[1].trim() : 'unknown';
+          await redisClient.ping();
+          const responseTime = Date.now() - start;
 
           return {
             status: 'healthy',
-            responseTime: `${duration}ms`,
+            message: 'Redis responding',
             details: {
-              connected: true,
-              memoryUsed,
-              database: redis.client.options.db || 0
+              responseTime: `${responseTime}ms`
             }
           };
         } catch (error) {
           return {
             status: 'unhealthy',
-            error: error.message,
-            responseTime: `${Date.now() - start}ms`
+            message: 'Redis ping failed',
+            error: error.message
           };
         }
       }
     });
 
-    // System resources health check
-    this.healthChecks.set('system', {
-      name: 'System Resources',
-      critical: true,
+    // Memory health check
+    this.addHealthCheck('memory', {
+      name: 'Memory Usage',
+      critical: false,
       timeout: 1000,
       check: async () => {
-        try {
-          const memoryUsage = process.memoryUsage();
-          const memoryMB = memoryUsage.heapUsed / 1024 / 1024;
-          const memoryTotalMB = memoryUsage.heapTotal / 1024 / 1024;
-          
-          // Memory health assessment
-          let memoryStatus = 'healthy';
-          if (memoryMB > 1024) memoryStatus = 'critical';
-          else if (memoryMB > 512) memoryStatus = 'warning';
+        const memoryUsage = process.memoryUsage();
+        const heapUsedMB = Math.round(memoryUsage.heapUsed / 1024 / 1024);
+        const heapTotalMB = Math.round(memoryUsage.heapTotal / 1024 / 1024);
+        const rssMB = Math.round(memoryUsage.rss / 1024 / 1024);
+        
+        const heapPercentage = (memoryUsage.heapUsed / memoryUsage.heapTotal) * 100;
 
-          // CPU usage (simplified)
-          const cpuUsage = process.cpuUsage();
-          
-          // Overall system status
-          const status = memoryStatus === 'critical' ? 'unhealthy' : 'healthy';
-
-          return {
-            status,
-            details: {
-              memory: {
-                used: `${Math.round(memoryMB)}MB`,
-                total: `${Math.round(memoryTotalMB)}MB`,
-                percentage: Math.round((memoryMB / memoryTotalMB) * 100),
-                status: memoryStatus
-              },
-              cpu: {
-                user: cpuUsage.user,
-                system: cpuUsage.system
-              },
-              uptime: `${Math.round(process.uptime())}s`,
-              loadAverage: process.platform === 'linux' ? require('os').loadavg() : null,
-              platform: process.platform,
-              nodeVersion: process.version
-            }
-          };
-        } catch (error) {
+        if (heapPercentage > 90) {
           return {
             status: 'unhealthy',
-            error: error.message
+            message: 'Memory usage critical',
+            details: {
+              heapUsed: `${heapUsedMB}MB`,
+              heapTotal: `${heapTotalMB}MB`,
+              rss: `${rssMB}MB`,
+              percentage: `${heapPercentage.toFixed(2)}%`
+            }
+          };
+        } else if (heapPercentage > 75) {
+          return {
+            status: 'degraded',
+            message: 'Memory usage high',
+            details: {
+              heapUsed: `${heapUsedMB}MB`,
+              heapTotal: `${heapTotalMB}MB`,
+              rss: `${rssMB}MB`,
+              percentage: `${heapPercentage.toFixed(2)}%`
+            }
           };
         }
+
+        return {
+          status: 'healthy',
+          message: 'Memory usage normal',
+          details: {
+            heapUsed: `${heapUsedMB}MB`,
+            heapTotal: `${heapTotalMB}MB`,
+            rss: `${rssMB}MB`,
+            percentage: `${heapPercentage.toFixed(2)}%`
+          }
+        };
       }
     });
 
-    // Disk space health check (if needed)
-    this.healthChecks.set('disk', {
+    // Disk space health check (simplified)
+    this.addHealthCheck('diskSpace', {
       name: 'Disk Space',
       critical: false,
-      timeout: 2000,
+      timeout: 3000,
       check: async () => {
-        try {
-          // Simplified disk check - in production you might want to use 'df' command
-          const stats = {
-            status: 'healthy',
-            details: {
-              // This would need actual disk space checking implementation
-              available: 'unknown',
-              used: 'unknown',
-              message: 'Disk monitoring not implemented'
-            }
-          };
-          
-          return stats;
-        } catch (error) {
-          return {
-            status: 'unhealthy',
-            error: error.message
-          };
-        }
+        // This is a simplified check - in production you'd use proper disk space checking
+        return {
+          status: 'healthy',
+          message: 'Disk space check not implemented',
+          details: {}
+        };
       }
     });
 
-    logger.info('🏥 Health checks registered', {
-      checks: Array.from(this.healthChecks.keys()),
-      critical: Array.from(this.healthChecks.values()).filter(check => check.critical).length,
-      total: this.healthChecks.size
+    logger.info('🏥 Registered default health checks', {
+      checks: Array.from(this.healthChecks.keys())
     });
   }
 
@@ -211,35 +256,43 @@ class HealthService {
   // =============================================
 
   async performHealthCheck() {
+    const logger = this.getLogger();
     const healthCheckStart = Date.now();
     const results = new Map();
     let overallStatus = 'healthy';
     const errors = [];
 
-    logger.debug('🔍 Performing health check...');
+    logger.debug('🏥 Performing health check...');
 
-    // Run all health checks in parallel
+    // Execute all health checks in parallel
     const checkPromises = Array.from(this.healthChecks.entries()).map(async ([name, config]) => {
+      const checkStart = Date.now();
+      
       try {
-        const checkStart = Date.now();
-        
-        // Create timeout promise
+        // Execute health check with timeout
         const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error(`Health check timeout (${config.timeout}ms)`)), config.timeout);
+          setTimeout(() => reject(new Error('Health check timeout')), config.timeout);
         });
 
-        // Race between health check and timeout
-        const result = await Promise.race([
+        const checkResult = await Promise.race([
           config.check(),
           timeoutPromise
         ]);
 
         const duration = Date.now() - checkStart;
         
-        results.set(name, {
-          ...result,
+        const result = {
+          ...checkResult,
           name: config.name,
           critical: config.critical,
+          duration: `${duration}ms`,
+          timestamp: new Date().toISOString()
+        };
+
+        results.set(name, result);
+
+        logger.debug(`Health check completed: ${name}`, {
+          status: result.status,
           duration: `${duration}ms`,
           timestamp: new Date().toISOString()
         });
@@ -331,6 +384,8 @@ class HealthService {
   // =============================================
 
   startPeriodicHealthChecks() {
+    const logger = this.getLogger();
+    
     this.healthCheckInterval = setInterval(async () => {
       try {
         await this.performHealthCheck();
@@ -350,14 +405,27 @@ class HealthService {
   // =============================================
 
   async cacheHealthStatus(healthReport) {
+    const logger = this.getLogger();
+    const redis = this.getRedis();
+    
     try {
-      if (redis.isConnected) {
+      const redisClient = redis && redis.getClient ? redis.getClient() : null;
+      
+      if (redisClient && redisClient.isOpen) {
         // Cache current health status
-        await redis.set('scraper:health:current', healthReport, 60); // 1 minute TTL
+        await redisClient.setex(
+          'scraper:health:current',
+          60, // 1 minute TTL
+          JSON.stringify(healthReport)
+        );
         
         // Cache health history
         const recentHistory = this.healthHistory.slice(0, 10); // Last 10 checks
-        await redis.set('scraper:health:history', recentHistory, 300); // 5 minutes TTL
+        await redisClient.setex(
+          'scraper:health:history',
+          300, // 5 minutes TTL
+          JSON.stringify(recentHistory)
+        );
       }
     } catch (error) {
       logger.error('Error caching health status', { error: error.message });
@@ -410,6 +478,8 @@ class HealthService {
   // =============================================
 
   addHealthCheck(name, config) {
+    const logger = this.getLogger();
+    
     this.healthChecks.set(name, {
       name: config.name || name,
       critical: config.critical || false,
@@ -424,6 +494,8 @@ class HealthService {
   }
 
   removeHealthCheck(name) {
+    const logger = this.getLogger();
+    
     if (this.healthChecks.has(name)) {
       this.healthChecks.delete(name);
       logger.info(`🏥 Removed health check: ${name}`);
@@ -435,6 +507,8 @@ class HealthService {
   // =============================================
 
   async stop() {
+    const logger = this.getLogger();
+    
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;
@@ -451,6 +525,8 @@ class HealthService {
   }
 
   reset() {
+    const logger = this.getLogger();
+    
     this.healthHistory = [];
     this.healthStatus = 'unknown';
     this.lastHealthCheck = null;
@@ -463,4 +539,4 @@ class HealthService {
 // =============================================
 
 const healthService = new HealthService();
-export default healthService;
+module.exports = healthService;
