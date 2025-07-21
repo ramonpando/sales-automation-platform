@@ -2,15 +2,47 @@
 // METRICS SERVICE - CENTRALIZED METRICS COLLECTION
 // =============================================
 
-import logger from '../utils/logger.js';
-import redis from '../database/redis.js';
-
 class MetricsService {
   constructor() {
     this.metrics = new Map();
     this.isInitialized = false;
     this.flushInterval = null;
     this.metricsBuffer = [];
+    this.logger = null;
+    this.redis = null;
+  }
+
+  // =============================================
+  // LAZY LOADING OF DEPENDENCIES
+  // =============================================
+
+  getLogger() {
+    if (!this.logger) {
+      try {
+        this.logger = require('../utils/logger');
+      } catch {
+        // Fallback to console
+        this.logger = {
+          info: console.log,
+          error: console.error,
+          warn: console.warn,
+          debug: console.debug,
+          performance: { metric: (op, dur, unit) => console.log(`Performance: ${op} - ${dur}${unit}`) }
+        };
+      }
+    }
+    return this.logger;
+  }
+
+  getRedis() {
+    if (!this.redis) {
+      try {
+        this.redis = require('../database/redis');
+      } catch {
+        this.redis = null;
+      }
+    }
+    return this.redis;
   }
 
   // =============================================
@@ -18,6 +50,8 @@ class MetricsService {
   // =============================================
 
   async initialize() {
+    const logger = this.getLogger();
+    
     try {
       logger.info('📈 Initializing Metrics Service...');
 
@@ -72,6 +106,8 @@ class MetricsService {
   // =============================================
 
   recordRequest(type, source, status, duration = null) {
+    const logger = this.getLogger();
+    
     try {
       // Increment total requests
       this.increment('http_requests_total');
@@ -107,6 +143,8 @@ class MetricsService {
   }
 
   recordResponseTime(duration) {
+    const logger = this.getLogger();
+    
     try {
       const currentAvg = this.get('http_response_time_avg') || 0;
       const totalRequests = this.get('http_requests_total') || 1;
@@ -125,6 +163,8 @@ class MetricsService {
   // =============================================
 
   recordScrapingSession(source, status, stats = {}) {
+    const logger = this.getLogger();
+    
     try {
       this.increment('scraping_sessions_total');
 
@@ -166,6 +206,8 @@ class MetricsService {
   }
 
   recordLeadProcessed(source, action, success = true) {
+    const logger = this.getLogger();
+    
     try {
       switch (action) {
         case 'found':
@@ -210,6 +252,8 @@ class MetricsService {
   // =============================================
 
   recordSystemMetrics() {
+    const logger = this.getLogger();
+    
     try {
       const memoryUsage = process.memoryUsage();
       const memoryMB = Math.round(memoryUsage.heapUsed / 1024 / 1024);
@@ -233,11 +277,12 @@ class MetricsService {
   // =============================================
 
   startTimer(name) {
+    const startTime = Date.now();
     return {
       name,
-      startTime: Date.now(),
+      startTime,
       end: () => {
-        const duration = Date.now() - this.startTime;
+        const duration = Date.now() - startTime;
         this.recordDuration(name, duration);
         return duration;
       }
@@ -245,6 +290,8 @@ class MetricsService {
   }
 
   recordDuration(operation, duration) {
+    const logger = this.getLogger();
+    
     try {
       this.addToBuffer({
         type: 'duration',
@@ -253,7 +300,9 @@ class MetricsService {
         timestamp: Date.now()
       });
 
-      logger.performance.metric(operation, duration, 'ms');
+      if (logger.performance && logger.performance.metric) {
+        logger.performance.metric(operation, duration, 'ms');
+      }
 
     } catch (error) {
       logger.error('Error recording duration', { error: error.message });
@@ -331,25 +380,43 @@ class MetricsService {
         await this.flushMetrics();
         this.recordSystemMetrics();
       } catch (error) {
+        const logger = this.getLogger();
         logger.error('Error in metrics flush interval', { error: error.message });
       }
     }, 30000); // Every 30 seconds
   }
 
   async flushMetrics() {
+    const logger = this.getLogger();
+    const redis = this.getRedis();
+    
     try {
-      if (!redis.isConnected) {
+      if (!redis) {
+        logger.debug('Skipping metrics flush - Redis not available');
+        return;
+      }
+
+      const redisClient = redis.getClient ? redis.getClient() : null;
+      if (!redisClient || !redisClient.isOpen) {
         logger.debug('Skipping metrics flush - Redis not connected');
         return;
       }
 
       // Cache current metrics
       const currentMetrics = this.getAll();
-      await redis.set('scraper:metrics:current', currentMetrics, 300); // 5 minutes TTL
+      await redisClient.setex(
+        'scraper:metrics:current',
+        300, // 5 minutes TTL
+        JSON.stringify(currentMetrics)
+      );
 
       // Cache recent buffer
       const recentMetrics = this.getBuffer(null, 50);
-      await redis.set('scraper:metrics:recent', recentMetrics, 300);
+      await redisClient.setex(
+        'scraper:metrics:recent',
+        300,
+        JSON.stringify(recentMetrics)
+      );
 
       logger.debug('📊 Metrics flushed to Redis', {
         metricsCount: Object.keys(currentMetrics).length,
@@ -366,6 +433,8 @@ class MetricsService {
   // =============================================
 
   generateReport(timeRange = '1h') {
+    const logger = this.getLogger();
+    
     try {
       const metrics = this.getAll();
       const buffer = this.getBuffer();
@@ -433,6 +502,8 @@ class MetricsService {
   // =============================================
 
   async stop() {
+    const logger = this.getLogger();
+    
     if (this.flushInterval) {
       clearInterval(this.flushInterval);
       this.flushInterval = null;
@@ -445,10 +516,23 @@ class MetricsService {
   }
 
   reset() {
+    const logger = this.getLogger();
+    
     this.metrics.clear();
     this.metricsBuffer = [];
     this.initializeMetrics();
     logger.info('📊 Metrics reset');
+  }
+
+  // =============================================
+  // ADDITIONAL METHODS FOR COMPATIBILITY
+  // =============================================
+
+  getHealthStatus() {
+    return {
+      status: 'operational',
+      metrics: this.getAll()
+    };
   }
 }
 
@@ -457,4 +541,4 @@ class MetricsService {
 // =============================================
 
 const metricsService = new MetricsService();
-export default metricsService;
+module.exports = metricsService;
