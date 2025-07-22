@@ -297,6 +297,7 @@ class ApifyScraperService {
       throw error;
     }
   }
+  
   // =============================================
   // PYMES.ORG.MX SCRAPER
   // =============================================
@@ -543,6 +544,7 @@ class ApifyScraperService {
     if (url.startsWith('/')) return null; // Relative URL, ignore
     return 'https://' + url;
   }
+  
   // =============================================
   // UTILITY METHODS
   // =============================================
