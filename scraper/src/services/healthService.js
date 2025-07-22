@@ -11,21 +11,25 @@ class HealthService {
     this.healthCheckInterval = null;
     this.isInitialized = false;
     
-    // Dependencies
+    // Dependencies will be lazy-loaded to avoid circular dependencies
+    // and improve startup performance.
     this.logger = null;
     this.database = null;
     this.redis = null;
   }
 
   // =============================================
-  // LAZY LOADING OF DEPENDENCIES
+  // LAZY LOADING OF DEPENDENCIES (IMPROVED)
   // =============================================
 
   getLogger() {
     if (!this.logger) {
       try {
+        // Carga el logger solo una vez.
         this.logger = require('../utils/logger');
       } catch {
+        // Si falla, usa un logger básico como fallback.
+        console.warn('Warning: Custom logger not found. Falling back to console.');
         this.logger = {
           info: console.log,
           error: console.error,
@@ -41,7 +45,8 @@ class HealthService {
     if (!this.database) {
       try {
         this.database = require('../database/connection');
-      } catch {
+      } catch (e) {
+        this.getLogger().error('Failed to load Database module.', { error: e.message });
         this.database = null;
       }
     }
@@ -51,8 +56,10 @@ class HealthService {
   getRedis() {
     if (!this.redis) {
       try {
+        // Carga el módulo de Redis completo.
         this.redis = require('../database/redis');
-      } catch {
+      } catch (e) {
+        this.getLogger().error('Failed to load Redis module.', { error: e.message });
         this.redis = null;
       }
     }
@@ -68,108 +75,55 @@ class HealthService {
     
     try {
       logger.info('🏥 Initializing Health Service...');
-
-      // Register default health checks
       this.registerDefaultHealthChecks();
-
-      // Start periodic health checks
       this.startPeriodicHealthChecks();
-
-      // Perform initial health check
-      await this.performHealthCheck();
-
+      await this.performHealthCheck(); // Realiza la primera comprobación al iniciar.
       this.isInitialized = true;
       logger.info('✅ Health Service initialized successfully');
-
     } catch (error) {
       logger.error('❌ Failed to initialize Health Service', {
         error: error.message,
         stack: error.stack
       });
-      throw error;
+      throw error; // Propaga el error para detener el inicio si es crítico.
     }
   }
 
   // =============================================
-  // DEFAULT HEALTH CHECKS
+  // DEFAULT HEALTH CHECKS (REDIS CHECK IMPROVED)
   // =============================================
 
   registerDefaultHealthChecks() {
-    const logger = this.getLogger();
+    // ... (el resto de tus health checks como 'database', 'memory', etc., están bien y no necesitan cambios)
 
-    // Database health check
-    this.addHealthCheck('database', {
-      name: 'PostgreSQL Database',
-      critical: true,
-      timeout: 5000,
-      check: async () => {
-        const database = this.getDatabase();
-        
-        if (!database || !database.pool) {
-          return {
-            status: 'unhealthy',
-            message: 'Database not configured'
-          };
-        }
-
-        try {
-          const start = Date.now();
-          const result = await database.query('SELECT NOW()');
-          const responseTime = Date.now() - start;
-
-          return {
-            status: 'healthy',
-            message: 'Database responding',
-            details: {
-              responseTime: `${responseTime}ms`,
-              timestamp: result.rows[0].now
-            }
-          };
-        } catch (error) {
-          return {
-            status: 'unhealthy',
-            message: 'Database query failed',
-            error: error.message
-          };
-        }
-      }
-    });
-
-    // Redis health check
+    // Redis health check (MODIFICADO)
     this.addHealthCheck('redis', {
       name: 'Redis Cache',
-      critical: false,
+      critical: false, // No es crítico si la caché falla.
       timeout: 3000,
       check: async () => {
         const redis = this.getRedis();
-        const redisClient = redis && redis.getClient ? redis.getClient() : null;
         
-        if (!redisClient) {
-          return {
-            status: 'unhealthy',
-            message: 'Redis not configured'
-          };
+        // Comprueba si el módulo de Redis y la función isReady existen.
+        if (!redis || typeof redis.isReady !== 'function') {
+          return { status: 'unhealthy', message: 'Redis module not configured or loaded' };
+        }
+
+        // Usa la función isReady() que es más fiable.
+        if (!redis.isReady()) {
+          return { status: 'unhealthy', message: 'Redis client is not ready' };
         }
 
         try {
           const start = Date.now();
-          
-          if (!redisClient.isOpen) {
-            return {
-              status: 'unhealthy',
-              message: 'Redis not connected'
-            };
-          }
-          
-          await redisClient.ping();
+          // El PING es una excelente forma de verificar la conexión.
+          await redis.getClient().ping();
           const responseTime = Date.now() - start;
 
           return {
             status: 'healthy',
             message: 'Redis responding',
-            details: {
-              responseTime: `${responseTime}ms`
-            }
+            details: { responseTime: `${responseTime}ms` }
           };
         } catch (error) {
           return {
@@ -181,362 +135,71 @@ class HealthService {
       }
     });
 
-    // Memory health check
-    this.addHealthCheck('memory', {
-      name: 'Memory Usage',
-      critical: false,
-      timeout: 1000,
-      check: async () => {
-        const memoryUsage = process.memoryUsage();
-        const heapUsedMB = Math.round(memoryUsage.heapUsed / 1024 / 1024);
-        const heapTotalMB = Math.round(memoryUsage.heapTotal / 1024 / 1024);
-        const rssMB = Math.round(memoryUsage.rss / 1024 / 1024);
-        
-        const heapPercentage = (memoryUsage.heapUsed / memoryUsage.heapTotal) * 100;
-
-        if (heapPercentage > 90) {
-          return {
-            status: 'unhealthy',
-            message: 'Memory usage critical',
-            details: {
-              heapUsed: `${heapUsedMB}MB`,
-              heapTotal: `${heapTotalMB}MB`,
-              rss: `${rssMB}MB`,
-              percentage: `${heapPercentage.toFixed(2)}%`
-            }
-          };
-        } else if (heapPercentage > 75) {
-          return {
-            status: 'degraded',
-            message: 'Memory usage high',
-            details: {
-              heapUsed: `${heapUsedMB}MB`,
-              heapTotal: `${heapTotalMB}MB`,
-              rss: `${rssMB}MB`,
-              percentage: `${heapPercentage.toFixed(2)}%`
-            }
-          };
-        }
-
-        return {
-          status: 'healthy',
-          message: 'Memory usage normal',
-          details: {
-            heapUsed: `${heapUsedMB}MB`,
-            heapTotal: `${heapTotalMB}MB`,
-            rss: `${rssMB}MB`,
-            percentage: `${heapPercentage.toFixed(2)}%`
-          }
-        };
-      }
-    });
-
-    // Disk space health check (simplified)
-    this.addHealthCheck('diskSpace', {
-      name: 'Disk Space',
-      critical: false,
-      timeout: 3000,
-      check: async () => {
-        // This is a simplified check - in production you'd use proper disk space checking
-        return {
-          status: 'healthy',
-          message: 'Disk space check not implemented',
-          details: {}
-        };
-      }
-    });
-
-    logger.info('🏥 Registered default health checks', {
-      checks: Array.from(this.healthChecks.keys())
-    });
+    // ... (Aquí irían tus otros health checks como 'memory' y 'diskSpace')
   }
 
   // =============================================
-  // HEALTH CHECK EXECUTION
-  // =============================================
-
-  async performHealthCheck() {
-    const logger = this.getLogger();
-    const healthCheckStart = Date.now();
-    const results = new Map();
-    let overallStatus = 'healthy';
-    const errors = [];
-
-    logger.debug('🏥 Performing health check...');
-
-    // Execute all health checks in parallel
-    const checkPromises = Array.from(this.healthChecks.entries()).map(async ([name, config]) => {
-      const checkStart = Date.now();
-      
-      try {
-        // Execute health check with timeout
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Health check timeout')), config.timeout);
-        });
-
-        const checkResult = await Promise.race([
-          config.check(),
-          timeoutPromise
-        ]);
-
-        const duration = Date.now() - checkStart;
-        
-        const result = {
-          ...checkResult,
-          name: config.name,
-          critical: config.critical,
-          duration: `${duration}ms`,
-          timestamp: new Date().toISOString()
-        };
-
-        results.set(name, result);
-
-        logger.debug(`Health check completed: ${name}`, {
-          status: result.status,
-          duration: `${duration}ms`,
-          timestamp: new Date().toISOString()
-        });
-
-        // Update overall status
-        if (result.status === 'unhealthy' && config.critical) {
-          overallStatus = 'unhealthy';
-          errors.push(`${config.name}: ${result.error || 'Unknown error'}`);
-        } else if (result.status !== 'healthy' && overallStatus === 'healthy') {
-          overallStatus = 'degraded';
-        }
-
-      } catch (error) {
-        const duration = Date.now() - checkStart;
-        
-        results.set(name, {
-          status: 'unhealthy',
-          name: config.name,
-          critical: config.critical,
-          error: error.message,
-          duration: `${duration}ms`,
-          timestamp: new Date().toISOString()
-        });
-
-        if (config.critical) {
-          overallStatus = 'unhealthy';
-          errors.push(`${config.name}: ${error.message}`);
-        }
-
-        logger.error(`Health check failed: ${name}`, {
-          error: error.message,
-          duration: `${duration}ms`
-        });
-      }
-    });
-
-    await Promise.all(checkPromises);
-
-    const totalDuration = Date.now() - healthCheckStart;
-    
-    const healthReport = {
-      status: overallStatus,
-      timestamp: new Date().toISOString(),
-      duration: `${totalDuration}ms`,
-      service: 'sales-scraper',
-      version: '2.0.0',
-      uptime: process.uptime(),
-      checks: Object.fromEntries(results),
-      summary: {
-        total: this.healthChecks.size,
-        healthy: Array.from(results.values()).filter(r => r.status === 'healthy').length,
-        unhealthy: Array.from(results.values()).filter(r => r.status === 'unhealthy').length,
-        critical_failures: errors.length
-      }
-    };
-
-    // Update internal state
-    this.healthStatus = overallStatus;
-    this.lastHealthCheck = healthReport;
-
-    // Add to history (keep last 50 checks)
-    this.healthHistory.unshift(healthReport);
-    if (this.healthHistory.length > 50) {
-      this.healthHistory = this.healthHistory.slice(0, 50);
-    }
-
-    // Log health status changes
-    if (overallStatus !== 'healthy') {
-      logger.warn(`🚨 Health check completed with status: ${overallStatus}`, {
-        status: overallStatus,
-        errors: errors,
-        duration: `${totalDuration}ms`
-      });
-    } else {
-      logger.debug('✅ Health check completed successfully', {
-        status: overallStatus,
-        duration: `${totalDuration}ms`
-      });
-    }
-
-    // Cache health status in Redis
-    await this.cacheHealthStatus(healthReport);
-
-    return healthReport;
-  }
-
-  // =============================================
-  // PERIODIC HEALTH CHECKS
-  // =============================================
-
-  startPeriodicHealthChecks() {
-    const logger = this.getLogger();
-    
-    this.healthCheckInterval = setInterval(async () => {
-      try {
-        await this.performHealthCheck();
-      } catch (error) {
-        logger.error('Error in periodic health check', {
-          error: error.message,
-          stack: error.stack
-        });
-      }
-    }, 30000); // Every 30 seconds
-
-    logger.info('⏰ Periodic health checks started (30s interval)');
-  }
-
-  // =============================================
-  // CACHING AND STORAGE
+  // CACHING AND STORAGE (FIXED)
   // =============================================
 
   async cacheHealthStatus(healthReport) {
     const logger = this.getLogger();
     const redis = this.getRedis();
     
+    // Comprueba si el módulo de Redis está disponible y listo para usarse.
+    if (!redis || !redis.isReady()) {
+      logger.debug('Skipping health status cache: Redis is not ready.');
+      return;
+    }
+    
     try {
-      const redisClient = redis && redis.getClient ? redis.getClient() : null;
+      // CORRECTO: Llama a la función `setex` exportada desde tu módulo de Redis.
+      // No llames a `redis.getClient().setex` porque no existe.
       
-      if (redisClient && redisClient.isOpen) {
-        // Cache current health status
-        await redisClient.setex(
-          'scraper:health:current',
-          60, // 1 minute TTL
-          JSON.stringify(healthReport)
-        );
-        
-        // Cache health history
-        const recentHistory = this.healthHistory.slice(0, 10); // Last 10 checks
-        await redisClient.setex(
-          'scraper:health:history',
-          300, // 5 minutes TTL
-          JSON.stringify(recentHistory)
-        );
-      }
+      // Cachea el estado de salud actual por 60 segundos.
+      await redis.setex(
+        'scraper:health:current',
+        60, // 1 minuto TTL
+        JSON.stringify(healthReport)
+      );
+      
+      // Cachea un historial reciente (últimos 10) por 5 minutos.
+      const recentHistory = this.healthHistory.slice(0, 10);
+      await redis.setex(
+        'scraper:health:history',
+        300, // 5 minutos TTL
+        JSON.stringify(recentHistory)
+      );
+
     } catch (error) {
-      logger.error('Error caching health status', { error: error.message });
+      // Este error ya no debería ser "is not a function".
+      logger.error('Error caching health status to Redis', { error: error.message });
     }
   }
 
   // =============================================
-  // PUBLIC API METHODS
+  // EL RESTO DE TU CÓDIGO
+  // (No necesita cambios, puedes copiar y pegar el resto de tus funciones aquí)
   // =============================================
-
-  getHealthStatus() {
-    return {
-      current: this.lastHealthCheck,
-      status: this.healthStatus,
-      lastCheck: this.lastHealthCheck?.timestamp,
-      uptime: process.uptime(),
-      initialized: this.isInitialized
-    };
-  }
-
-  getHealthHistory(limit = 10) {
-    return this.healthHistory.slice(0, limit);
-  }
-
-  async getDetailedHealth() {
-    // Return cached health or perform new check if cache is stale
-    const now = Date.now();
-    const lastCheckTime = this.lastHealthCheck ? new Date(this.lastHealthCheck.timestamp).getTime() : 0;
-    const cacheAge = now - lastCheckTime;
-
-    // If cache is older than 1 minute, perform new check
-    if (cacheAge > 60000) {
-      return await this.performHealthCheck();
-    }
-
-    return this.lastHealthCheck;
-  }
-
-  isHealthy() {
-    return this.healthStatus === 'healthy';
-  }
-
-  isReady() {
-    // Service is ready if initialized and not unhealthy
-    return this.isInitialized && this.healthStatus !== 'unhealthy';
-  }
-
-  // =============================================
-  // HEALTH CHECK MANAGEMENT
-  // =============================================
-
-  addHealthCheck(name, config) {
-    const logger = this.getLogger();
-    
-    this.healthChecks.set(name, {
-      name: config.name || name,
-      critical: config.critical || false,
-      timeout: config.timeout || 5000,
-      check: config.check
-    });
-
-    logger.info(`🏥 Added health check: ${name}`, {
-      critical: config.critical,
-      timeout: config.timeout
-    });
-  }
-
-  removeHealthCheck(name) {
-    const logger = this.getLogger();
-    
-    if (this.healthChecks.has(name)) {
-      this.healthChecks.delete(name);
-      logger.info(`🏥 Removed health check: ${name}`);
-    }
-  }
-
-  // =============================================
-  // CLEANUP
-  // =============================================
-
-  async stop() {
-    const logger = this.getLogger();
-    
-    if (this.healthCheckInterval) {
-      clearInterval(this.healthCheckInterval);
-      this.healthCheckInterval = null;
-    }
-
-    // Perform final health check
-    try {
-      await this.performHealthCheck();
-    } catch (error) {
-      logger.error('Error in final health check', { error: error.message });
-    }
-
-    logger.info('🏥 Health Service stopped');
-  }
-
-  reset() {
-    const logger = this.getLogger();
-    
-    this.healthHistory = [];
-    this.healthStatus = 'unknown';
-    this.lastHealthCheck = null;
-    logger.info('🏥 Health status reset');
-  }
+  
+  // performHealthCheck()
+  // startPeriodicHealthChecks()
+  // getHealthStatus()
+  // getHealthHistory()
+  // getDetailedHealth()
+  // isHealthy()
+  // isReady()
+  // addHealthCheck()
+  // removeHealthCheck()
+  // stop()
+  // reset()
+  
+  // ... (Pega aquí el resto de las funciones de tu clase que no he modificado)
 }
 
 // =============================================
 // SINGLETON EXPORT
 // =============================================
-
 const healthService = new HealthService();
 module.exports = healthService;
+
