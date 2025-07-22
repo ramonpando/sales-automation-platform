@@ -249,6 +249,42 @@ async function startServer() {
       }
     }
 
+    // Initialize Scraper Service if available
+    if (scraperService) {
+      try {
+        // El scraperService necesita ser inicializado con database, redis y logger
+        const scraperInstance = scraperService.initialize(database, redis, logger);
+        
+        if (scraperInstance && typeof scraperInstance.initialize === 'function') {
+          await scraperInstance.initialize();
+          logger.info('✅ Scraper Service initialized');
+        }
+      } catch (error) {
+        logger.error('❌ Scraper Service initialization failed:', error.message);
+        // Continue anyway - the app can work but scraping won't be available
+      }
+    }
+
+    // Initialize Metrics Service if available
+    if (metricsService && typeof metricsService.initialize === 'function') {
+      try {
+        await metricsService.initialize();
+        logger.info('✅ Metrics Service initialized');
+      } catch (error) {
+        logger.error('❌ Metrics Service initialization failed:', error.message);
+      }
+    }
+
+    // Initialize Health Service if available
+    if (healthService && typeof healthService.initialize === 'function') {
+      try {
+        await healthService.initialize();
+        logger.info('✅ Health Service initialized');
+      } catch (error) {
+        logger.error('❌ Health Service initialization failed:', error.message);
+      }
+    }
+
     // Start Express server
     const server = app.listen(PORT, '0.0.0.0', () => {
       logger.info(`✅ Server running on port ${PORT}`);
@@ -263,6 +299,22 @@ async function startServer() {
       server.close(() => {
         logger.info('HTTP server closed');
       });
+
+      // Stop services
+      if (scraperService) {
+        const instance = scraperService.getInstance();
+        if (instance && typeof instance.stop === 'function') {
+          await instance.stop();
+        }
+      }
+
+      if (metricsService && typeof metricsService.stop === 'function') {
+        await metricsService.stop();
+      }
+
+      if (healthService && typeof healthService.stop === 'function') {
+        await healthService.stop();
+      }
 
       // Close database connections
       if (database && typeof database.close === 'function') {
