@@ -8,6 +8,14 @@ const { RateLimiterMemory } = require('rate-limiter-flexible');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 
+// Lazy load Apify scraper
+let ApifyScraperService;
+try {
+  ApifyScraperService = require('./scrapers/apifyScraperService');
+} catch (error) {
+  console.log('Apify scraper not available');
+}
+
 // =============================================
 // SCRAPER CONFIGURATION
 // =============================================
@@ -80,6 +88,10 @@ class ScraperService {
       totalErrors: 0,
       lastRun: null
     };
+    
+    // Initialize Apify scraper if available
+    this.apifyScraper = null;
+    this.metricsService = null;
   }
 
   // =============================================
@@ -98,11 +110,30 @@ class ScraperService {
       // Load stats from database
       await this.loadStats();
 
+      // Initialize metrics service
+      try {
+        this.metricsService = require('./metricsService');
+      } catch (error) {
+        this.logger.warn('Metrics service not available');
+      }
+
+      // Initialize Apify if enabled
+      if (process.env.USE_APIFY === 'true' && ApifyScraperService) {
+        try {
+          this.apifyScraper = new ApifyScraperService(this.logger, this.metricsService);
+          await this.apifyScraper.initialize();
+          this.logger.info('✅ Apify scraper initialized');
+        } catch (error) {
+          this.logger.error('Failed to initialize Apify scraper', error);
+        }
+      }
+
       this.logger.info('✅ Scraper Service initialized successfully', {
         autoStart: config.autoStart,
         sources: Object.keys(config.sources).filter(s => config.sources[s].enabled),
         maxConcurrentRequests: config.maxConcurrentRequests,
-        schedule: config.scraperInterval
+        schedule: config.scraperInterval,
+        apifyEnabled: !!this.apifyScraper
       });
 
     } catch (error) {
@@ -310,6 +341,26 @@ class ScraperService {
   }
 
   async scrapePage(sourceName, sourceConfig, category, page, sessionId) {
+    // Si Apify está habilitado y es Páginas Amarillas, intentar usar el scraper mejorado
+    if (this.apifyScraper && sourceName === 'paginasAmarillas' && process.env.USE_APIFY === 'true') {
+      try {
+        this.logger.info('Using Apify enhanced scraper for Páginas Amarillas');
+        const result = await this.apifyScraper.scrapePaginasAmarillasEnhanced(
+          category,
+          'Mexico', // o usar location del config
+          50 // límite por página
+        );
+        
+        return {
+          leads: result.results,
+          hasNextPage: result.results.length >= 50
+        };
+      } catch (error) {
+        this.logger.warn('Apify scraping failed, falling back to basic scraper', error);
+        // Continuar con el scraper básico
+      }
+    }
+    
     const url = this.buildSearchUrl(sourceConfig, category, page);
     
     try {
@@ -343,6 +394,64 @@ class ScraperService {
         category,
         page
       });
+      throw error;
+    }
+  }
+
+  // =============================================
+  // APIFY INTEGRATION
+  // =============================================
+
+  async scrapeWithApify(config) {
+    if (!this.apifyScraper) {
+      throw new Error('Apify scraper not initialized');
+    }
+
+    const results = {
+      paginasAmarillas: [],
+      googleMyBusiness: [],
+      linkedin: []
+    };
+
+    try {
+      // Scrape Páginas Amarillas
+      if (config.sources.includes('paginasAmarillas')) {
+        const paResults = await this.apifyScraper.scrapePaginasAmarillasEnhanced(
+          config.category,
+          config.location,
+          config.limit
+        );
+        results.paginasAmarillas = paResults.results;
+      }
+
+      // Scrape Google My Business
+      if (config.sources.includes('googleMyBusiness')) {
+        const gmbResults = await this.apifyScraper.scrapeGoogleMyBusiness(
+          config.category,
+          config.location,
+          config.limit
+        );
+        results.googleMyBusiness = gmbResults.results;
+      }
+
+      // Scrape LinkedIn (si está configurado)
+      if (config.sources.includes('linkedin') && process.env.LINKEDIN_COOKIE) {
+        const linkedinResults = await this.apifyScraper.scrapeLinkedInCompanies(
+          config.category,
+          config.location,
+          Math.min(config.limit, 20) // LinkedIn es más restrictivo
+        );
+        results.linkedin = linkedinResults.results;
+      }
+
+      return {
+        success: true,
+        results,
+        totalLeads: Object.values(results).flat().length
+      };
+
+    } catch (error) {
+      this.logger.error('Apify scraping failed', error);
       throw error;
     }
   }
@@ -698,7 +807,8 @@ class ScraperService {
       stats: this.stats,
       config: {
         maxConcurrentRequests: config.maxConcurrentRequests,
-        sources: Object.keys(config.sources).filter(s => config.sources[s].enabled)
+        sources: Object.keys(config.sources).filter(s => config.sources[s].enabled),
+        apifyEnabled: !!this.apifyScraper
       }
     };
   }
@@ -714,6 +824,11 @@ class ScraperService {
     
     this.cronJobs.clear();
     this.isRunning = false;
+    
+    // Cleanup Apify if needed
+    if (this.apifyScraper && this.apifyScraper.cleanup) {
+      await this.apifyScraper.cleanup();
+    }
     
     this.logger.info('✅ Scraper Service stopped');
   }
@@ -735,6 +850,17 @@ class ScraperService {
         });
       }
     }
+    
+    // Add Apify scrapers if enabled
+    if (this.apifyScraper) {
+      scrapers.push({
+        id: 'googleMyBusiness',
+        name: 'Google My Business',
+        enabled: true,
+        hasEmail: true
+      });
+    }
+    
     return scrapers;
   }
 
