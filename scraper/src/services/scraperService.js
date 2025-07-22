@@ -56,6 +56,14 @@ const config = {
       enabled: true,
       rateLimit: 100, // requests per hour
       categories: ['restaurantes', 'servicios', 'tiendas', 'profesionales']
+    },
+    pymesOrgMx: {
+      baseUrl: 'https://pymes.org.mx',
+      searchUrl: 'https://pymes.org.mx',
+      enabled: true,
+      rateLimit: 60, // requests per hour (be more conservative)
+      categories: ['tecnologia', 'servicios', 'manufactura', 'comercio'],
+      states: ['ciudad-de-mexico', 'jalisco', 'nuevo-leon', 'puebla']
     }
   }
 };
@@ -410,7 +418,8 @@ class ScraperService {
     const results = {
       paginasAmarillas: [],
       googleMyBusiness: [],
-      linkedin: []
+      linkedin: [],
+      pymesOrgMx: []  // Agregado PYMES
     };
 
     try {
@@ -442,6 +451,16 @@ class ScraperService {
           Math.min(config.limit, 20) // LinkedIn es más restrictivo
         );
         results.linkedin = linkedinResults.results;
+      }
+
+      // Scrape PYMES.org.mx
+      if (config.sources.includes('pymesOrgMx')) {
+        const pymesResults = await this.apifyScraper.scrapePymesOrgMx(
+          config.category,
+          config.state || 'ciudad-de-mexico',  // Default to CDMX
+          config.limit
+        );
+        results.pymesOrgMx = pymesResults.results;
       }
 
       return {
@@ -844,9 +863,12 @@ class ScraperService {
       if (scraper.enabled) {
         scrapers.push({
           id: key,
-          name: key === 'paginasAmarillas' ? 'Páginas Amarillas' : 'Sección Amarilla',
+          name: key === 'paginasAmarillas' ? 'Páginas Amarillas' : 
+                key === 'seccionAmarilla' ? 'Sección Amarilla' :
+                key === 'pymesOrgMx' ? 'PYMES.org.mx' : key,
           enabled: scraper.enabled,
-          hasEmail: key === 'paginasAmarillas'
+          hasEmail: true,
+          baseUrl: scraper.baseUrl
         });
       }
     }
