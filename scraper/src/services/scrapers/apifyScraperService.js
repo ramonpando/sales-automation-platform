@@ -297,7 +297,252 @@ class ApifyScraperService {
       throw error;
     }
   }
+  // =============================================
+  // PYMES.ORG.MX SCRAPER
+  // =============================================
 
+  async scrapePymesOrgMx(category, state, limit = 100) {
+    const startTime = Date.now();
+    const results = [];
+    
+    try {
+      this.logger.info('Starting PYMES.org.mx scraping with Apify', {
+        category,
+        state,
+        limit
+      });
+
+      // Create request list
+      const baseUrl = 'https://pymes.org.mx';
+      const requests = [];
+      
+      // First, get the category URL
+      const categorySlug = this.slugify(category);
+      const stateSlug = this.slugify(state);
+      
+      // PYMES uses URLs like: /estado/categoria/
+      requests.push({
+        url: `${baseUrl}/${stateSlug}/${categorySlug}/`,
+        userData: { 
+          type: 'category',
+          category, 
+          state,
+          page: 1 
+        }
+      });
+
+      // Create crawler
+      const crawler = new CheerioCrawler({
+        requestHandlerTimeoutSecs: 30,
+        maxRequestRetries: 3,
+        maxConcurrency: 3, // Be respectful with the site
+        
+        async requestHandler({ request, $, crawler }) {
+          const timer = this.metricsService ? this.metricsService.startTimer('pymes_page') : null;
+          
+          try {
+            this.logger.info(`Processing ${request.userData.type} page`, {
+              url: request.url,
+              page: request.userData.page
+            });
+
+            if (request.userData.type === 'category') {
+              // Extract business listings from category page
+              const businessLinks = [];
+              
+              // PYMES uses different selectors, we need to identify them
+              $('.empresa-item, .business-listing, .directorio-item, article.empresa').each((index, element) => {
+                const $item = $(element);
+                const businessUrl = $item.find('a').attr('href');
+                
+                if (businessUrl) {
+                  const fullUrl = new URL(businessUrl, request.url).href;
+                  businessLinks.push(fullUrl);
+                  
+                  // Add request to scrape business details
+                  if (results.length < limit) {
+                    crawler.addRequests([{
+                      url: fullUrl,
+                      userData: {
+                        type: 'business',
+                        category: request.userData.category,
+                        state: request.userData.state
+                      }
+                    }]);
+                  }
+                }
+              });
+
+              this.logger.info(`Found ${businessLinks.length} businesses on category page`);
+              
+              // Check for pagination
+              const nextPageLink = $('.pagination .next, .paginacion .siguiente, a[rel="next"]').attr('href');
+              if (nextPageLink && results.length < limit) {
+                await crawler.addRequests([{
+                  url: new URL(nextPageLink, request.url).href,
+                  userData: { 
+                    ...request.userData, 
+                    page: request.userData.page + 1 
+                  }
+                }]);
+              }
+              
+            } else if (request.userData.type === 'business') {
+              // Extract business details
+              const business = {
+                // Basic information
+                businessName: this.cleanText(
+                  $('h1, .empresa-nombre, .business-name, .titulo-empresa').first().text()
+                ),
+                
+                // Contact information
+                phone: this.extractPhone(
+                  $('.telefono, .phone, .contacto-telefono, [itemprop="telephone"]').text() ||
+                  $('a[href^="tel:"]').attr('href')
+                ),
+                
+                email: this.extractEmail(
+                  $('.email, .correo, .contacto-email, [itemprop="email"]').html() ||
+                  $('a[href^="mailto:"]').attr('href')
+                ),
+                
+                website: this.cleanUrl(
+                  $('.website, .sitio-web, .web, a[href*="http"]:contains("Sitio")').attr('href') ||
+                  $('[itemprop="url"]').attr('href')
+                ),
+                
+                // Location
+                address: this.cleanText(
+                  $('.direccion, .address, .ubicacion, [itemprop="address"]').text()
+                ),
+                
+                city: this.cleanText(
+                  $('.ciudad, .city, [itemprop="addressLocality"]').text()
+                ),
+                
+                state: request.userData.state,
+                
+                // Business details
+                category: request.userData.category,
+                
+                description: this.cleanText(
+                  $('.descripcion, .description, .acerca-de, [itemprop="description"]').text()
+                ).substring(0, 500),
+                
+                // Additional information
+                services: this.extractListItems($, '.servicios, .services, .lista-servicios'),
+                products: this.extractListItems($, '.productos, .products, .lista-productos'),
+                
+                // Social media
+                facebook: $('a[href*="facebook.com"]').attr('href'),
+                twitter: $('a[href*="twitter.com"]').attr('href'),
+                linkedin: $('a[href*="linkedin.com"]').attr('href'),
+                instagram: $('a[href*="instagram.com"]').attr('href'),
+                
+                // Metadata
+                source: 'pymes_org_mx',
+                sourceUrl: request.url,
+                scrapedAt: new Date().toISOString()
+              };
+
+              // Only add if we have a business name and some contact info
+              if (business.businessName && (business.phone || business.email || business.address)) {
+                results.push(business);
+                await Dataset.pushData([business]);
+                
+                this.logger.debug('Extracted business', {
+                  name: business.businessName,
+                  phone: business.phone,
+                  email: business.email
+                });
+              }
+            }
+            
+            // Record metrics
+            if (timer) timer.end();
+            if (this.metricsService) {
+              this.metricsService.recordLeadProcessed('pymes_org_mx', 'found', true);
+            }
+            
+          } catch (error) {
+            this.logger.error('Error processing page', {
+              url: request.url,
+              error: error.message
+            });
+            if (timer) timer.end();
+            throw error;
+          }
+        },
+        
+        failedRequestHandler({ request, error }) {
+          this.logger.error('Request failed', {
+            url: request.url,
+            error: error.message
+          });
+          if (this.metricsService) {
+            this.metricsService.recordRequest('scraper', 'pymes_org_mx', 'error');
+          }
+        }
+      });
+
+      // Run the crawler
+      await crawler.run(requests);
+      
+      const duration = Date.now() - startTime;
+      
+      this.logger.info('PYMES.org.mx scraping completed', {
+        totalResults: results.length,
+        duration: `${duration}ms`
+      });
+
+      return {
+        success: true,
+        source: 'pymes_org_mx',
+        results: results.slice(0, limit),
+        metadata: {
+          totalFound: results.length,
+          duration,
+          timestamp: new Date().toISOString(),
+          category,
+          state
+        }
+      };
+
+    } catch (error) {
+      this.logger.error('PYMES.org.mx scraping failed', error);
+      throw error;
+    }
+  }
+
+  // Helper method for PYMES scraper
+  extractListItems($, selector) {
+    const items = [];
+    $(selector).find('li, span, .item').each((i, el) => {
+      const text = this.cleanText($(el).text());
+      if (text) items.push(text);
+    });
+    return items.length > 0 ? items : null;
+  }
+
+  // Helper method to create URL slugs
+  slugify(text) {
+    if (!text) return '';
+    return text
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') // Remove accents
+      .replace(/[^a-z0-9]+/g, '-')     // Replace non-alphanumeric with hyphens
+      .replace(/^-+|-+$/g, '');        // Remove leading/trailing hyphens
+  }
+
+  // Helper method to clean URLs
+  cleanUrl(url) {
+    if (!url) return null;
+    if (url.startsWith('http')) return url;
+    if (url.startsWith('//')) return 'https:' + url;
+    if (url.startsWith('/')) return null; // Relative URL, ignore
+    return 'https://' + url;
+  }
   // =============================================
   // UTILITY METHODS
   // =============================================
