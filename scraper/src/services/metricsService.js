@@ -1,5 +1,5 @@
-// =============================================
-// METRICS SERVICE - CENTRALIZED METRICS COLLECTION
+ =============================================
+// METRICS SERVICE - CENTRALIZED METRICS COLLECTION (CORREGIDO)
 // =============================================
 
 class MetricsService {
@@ -371,7 +371,7 @@ class MetricsService {
   }
 
   // =============================================
-  // PERIODIC OPERATIONS
+  // PERIODIC OPERATIONS (CORREGIDO)
   // =============================================
 
   startMetricsFlush() {
@@ -396,15 +396,15 @@ class MetricsService {
         return;
       }
 
-      const redisClient = redis.getClient ? redis.getClient() : null;
-      if (!redisClient || !redisClient.isOpen) {
+      // CORRECCIÓN: Usar la función isReady() y setex() del módulo Redis
+      if (!redis.isReady()) {
         logger.debug('Skipping metrics flush - Redis not connected');
         return;
       }
 
-      // Cache current metrics
+      // Cache current metrics usando la función setex del módulo
       const currentMetrics = this.getAll();
-      await redisClient.setex(
+      await redis.setex(
         'scraper:metrics:current',
         300, // 5 minutes TTL
         JSON.stringify(currentMetrics)
@@ -412,7 +412,7 @@ class MetricsService {
 
       // Cache recent buffer
       const recentMetrics = this.getBuffer(null, 50);
-      await redisClient.setex(
+      await redis.setex(
         'scraper:metrics:recent',
         300,
         JSON.stringify(recentMetrics)
@@ -542,3 +542,4 @@ class MetricsService {
 
 const metricsService = new MetricsService();
 module.exports = metricsService;
+
