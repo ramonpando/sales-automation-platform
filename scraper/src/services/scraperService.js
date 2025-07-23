@@ -47,21 +47,21 @@ const config = {
       baseUrl: 'https://www.paginasamarillas.com.mx',
       searchUrl: 'https://www.paginasamarillas.com.mx/busqueda',
       enabled: true,
-      rateLimit: 100, // requests per hour
+      rateLimit: 100,
       categories: ['restaurantes', 'servicios', 'comercio', 'construccion']
     },
     seccionAmarilla: {
       baseUrl: 'https://www.seccionamarilla.com.mx',
       searchUrl: 'https://www.seccionamarilla.com.mx/buscar',
       enabled: true,
-      rateLimit: 100, // requests per hour
+      rateLimit: 100,
       categories: ['restaurantes', 'servicios', 'tiendas', 'profesionales']
     },
     pymesOrgMx: {
       baseUrl: 'https://pymes.org.mx',
-      searchUrl: 'https://pymes.org.mx',
+      searchUrl: 'https://pymes.org.mx', // no se usa realmente, generamos URL manual
       enabled: true,
-      rateLimit: 60, // requests per hour (be more conservative)
+      rateLimit: 60,
       categories: ['tecnologia', 'servicios', 'manufactura', 'comercio'],
       states: ['ciudad-de-mexico', 'jalisco', 'nuevo-leon', 'puebla']
     }
@@ -75,7 +75,7 @@ const config = {
 const rateLimiter = new RateLimiterMemory({
   keyGenerator: (req) => req.source || 'global',
   points: config.maxConcurrentRequests,
-  duration: 1 // Per second
+  duration: 1
 });
 
 // =============================================
@@ -97,7 +97,6 @@ class ScraperService {
       lastRun: null
     };
     
-    // Initialize Apify scraper if available
     this.apifyScraper = null;
     this.metricsService = null;
   }
@@ -110,22 +109,18 @@ class ScraperService {
     try {
       this.logger.info('🕷️ Initializing Scraper Service...');
 
-      // Setup scheduled scraping if enabled
       if (config.autoStart) {
         this.scheduleAutomaticScraping();
       }
 
-      // Load stats from database
       await this.loadStats();
 
-      // Initialize metrics service
       try {
         this.metricsService = require('./metricsService');
       } catch (error) {
         this.logger.warn('Metrics service not available');
       }
 
-      // Initialize Apify if enabled
       if (process.env.USE_APIFY === 'true' && ApifyScraperService) {
         try {
           this.apifyScraper = new ApifyScraperService(this.logger, this.metricsService);
@@ -193,7 +188,6 @@ class ScraperService {
     try {
       this.logger.info('Starting full scraping', { sessionId, options });
 
-      // Create scraping session record
       const session = await this.createScrapingSession(sessionId, 'automatic', options);
 
       const results = {
@@ -205,14 +199,13 @@ class ScraperService {
         sources: {}
       };
 
-      // Scrape from all enabled sources
       for (const [sourceName, sourceConfig] of Object.entries(config.sources)) {
         if (!sourceConfig.enabled) continue;
 
         try {
           this.logger.info(`🎯 Starting scraping from ${sourceName}`);
           
-          const sourceResults = await this.scrapeSource(sourceName, sourceConfig, sessionId);
+          const sourceResults = await this.scrapeSource(sourceName, sourceConfig, sessionId, options);
           results.sources[sourceName] = sourceResults;
           results.totalLeads += sourceResults.totalLeads;
           results.newLeads += sourceResults.newLeads;
@@ -225,21 +218,25 @@ class ScraperService {
         }
       }
 
-      // Update session with final results
       await this.updateScrapingSession(sessionId, 'completed', results);
 
-      // Update stats
       this.stats.totalSessions++;
       this.stats.totalLeads += results.totalLeads;
       this.stats.lastRun = new Date();
 
-      // Cache results if Redis is available
-      if (this.redis && this.redis.getClient()) {
-        await this.redis.getClient().setex(
-          `session:${sessionId}`,
-          86400,
-          JSON.stringify(results)
-        );
+      // --- Cache results en Redis (seguro para v4) ---
+      try {
+        const payload = JSON.stringify(results);
+        const key = `session:${sessionId}`;
+        if (this.redis?.setex) {
+          await this.redis.setex(key, 86400, payload);
+        } else if (this.redis?.getClient) {
+          const rc = this.redis.getClient();
+          if (rc?.setEx) await rc.setEx(key, 86400, payload);
+          else if (rc?.set) await rc.set(key, payload, { EX: 86400 });
+        }
+      } catch (e) {
+        this.logger.warn('Failed to cache session in Redis', { error: e.message });
       }
 
       this.logger.info('Full scraping completed', results);
@@ -255,7 +252,7 @@ class ScraperService {
     }
   }
 
-  async scrapeSource(sourceName, sourceConfig, sessionId) {
+  async scrapeSource(sourceName, sourceConfig, sessionId, globalOptions = {}) {
     const results = {
       source: sourceName,
       totalLeads: 0,
@@ -265,7 +262,58 @@ class ScraperService {
       categories: {}
     };
 
-    // Scrape each category
+    // ---- CASO ESPECIAL: pymesOrgMx con Apify ----
+    if (sourceName === 'pymesOrgMx' && this.apifyScraper && process.env.USE_APIFY === 'true') {
+      // Podemos correr por categoría igual, para mantener stats
+      for (const category of sourceConfig.categories) {
+        try {
+          this.logger.info(`📂 (Apify) Scraping category: ${category} from pymesOrgMx`);
+
+          const state = globalOptions.state || sourceConfig.states?.[0] || 'ciudad-de-mexico';
+          const limit = globalOptions.limit || 100;
+
+          const r = await this.apifyScraper.scrapePymesOrgMx(category, state, limit);
+
+          const normalized = r.results.map(x => this.normalizeLeadFromApify(x, category));
+
+          // Guardamos y contamos
+          let newLeads = 0;
+          let duplicates = 0;
+          for (const lead of normalized) {
+            try {
+              const saved = await this.saveLead(lead, sourceName, sessionId);
+              if (saved.isNew) newLeads++;
+              else duplicates++;
+            } catch (e) {
+              this.logger.error('Error saving lead (pymesOrgMx)', { e: e.message, lead });
+            }
+          }
+
+          results.categories[category] = {
+            category,
+            totalLeads: normalized.length,
+            newLeads,
+            duplicates,
+            pages: 1
+          };
+
+          results.totalLeads += normalized.length;
+          results.newLeads += newLeads;
+          results.duplicates += duplicates;
+
+          await this.delay(config.rateLimitDelay * 2);
+
+        } catch (err) {
+          this.logger.error(`❌ Error scraping pymesOrgMx category ${category}`, { error: err.message });
+          results.errors++;
+        }
+      }
+
+      return results;
+    }
+    // ---- FIN CASO ESPECIAL pymesOrgMx ----
+
+    // Resto de fuentes: loop por categorías + scrapePage()
     for (const category of sourceConfig.categories) {
       try {
         this.logger.info(`📂 Scraping category: ${category} from ${sourceName}`);
@@ -276,7 +324,6 @@ class ScraperService {
         results.newLeads += categoryResults.newLeads;
         results.duplicates += categoryResults.duplicates;
 
-        // Add delay between categories
         await this.delay(config.rateLimitDelay * 2);
 
       } catch (error) {
@@ -304,7 +351,7 @@ class ScraperService {
     let page = 1;
     let hasMorePages = true;
 
-    while (hasMorePages && page <= 10) { // Limit to 10 pages per category
+    while (hasMorePages && page <= 10) {
       try {
         this.logger.info(`📄 Scraping page ${page} of ${category} from ${sourceName}`);
 
@@ -313,25 +360,19 @@ class ScraperService {
         results.totalLeads += pageResults.leads.length;
         results.pages++;
 
-        // Process leads from this page
         for (const lead of pageResults.leads) {
           try {
             const saved = await this.saveLead(lead, sourceName, sessionId);
-            if (saved.isNew) {
-              results.newLeads++;
-            } else {
-              results.duplicates++;
-            }
+            if (saved.isNew) results.newLeads++;
+            else results.duplicates++;
           } catch (error) {
             this.logger.error('Error saving lead', { lead, error: error.message });
           }
         }
 
-        // Check if there are more pages
         hasMorePages = pageResults.hasNextPage;
         page++;
 
-        // Add delay between pages
         await this.delay(config.rateLimitDelay);
 
       } catch (error) {
@@ -349,39 +390,36 @@ class ScraperService {
   }
 
   async scrapePage(sourceName, sourceConfig, category, page, sessionId) {
-    // Si Apify está habilitado y es Páginas Amarillas, intentar usar el scraper mejorado
+    // --- Apify para Páginas Amarillas ---
     if (this.apifyScraper && sourceName === 'paginasAmarillas' && process.env.USE_APIFY === 'true') {
       try {
         this.logger.info('Using Apify enhanced scraper for Páginas Amarillas');
         const result = await this.apifyScraper.scrapePaginasAmarillasEnhanced(
           category,
-          'Mexico', // o usar location del config
-          50 // límite por página
+          'Mexico',
+          50
         );
-        
+
+        const leads = result.results.map(x => this.normalizeLeadFromApify(x, category));
+
         return {
-          leads: result.results,
+          leads,
           hasNextPage: result.results.length >= 50
         };
       } catch (error) {
         this.logger.warn('Apify scraping failed, falling back to basic scraper', error);
-        // Continuar con el scraper básico
       }
     }
-    
-    const url = this.buildSearchUrl(sourceConfig, category, page);
+
+    // --- Fallback / otros sitios ---
+    const url = this.buildSearchUrl(sourceName, sourceConfig, category, page);
     
     try {
-      // Apply rate limiting
       await rateLimiter.consume({ source: sourceName });
 
-      // Make HTTP request
       const response = await this.makeRequest(url, sourceName);
       
-      // Parse leads from HTML
-      const leads = this.parseLeads(response.data, sourceName, url);
-      
-      // Check for next page
+      const leads = this.parseLeads(response.data, sourceName, url, category);
       const hasNextPage = this.hasNextPage(response.data, sourceName);
 
       this.logger.info(`Page scraped`, {
@@ -407,60 +445,39 @@ class ScraperService {
   }
 
   // =============================================
-  // APIFY INTEGRATION
-  // =============================================
+  // APIFY INTEGRATION (manual endpoint /apify)
+// =============================================
 
-  async scrapeWithApify(config) {
-    if (!this.apifyScraper) {
-      throw new Error('Apify scraper not initialized');
-    }
+  async scrapeWithApify(cfg) {
+    if (!this.apifyScraper) throw new Error('Apify scraper not initialized');
 
     const results = {
       paginasAmarillas: [],
       googleMyBusiness: [],
       linkedin: [],
-      pymesOrgMx: []  // Agregado PYMES
+      pymesOrgMx: []
     };
 
     try {
-      // Scrape Páginas Amarillas
-      if (config.sources.includes('paginasAmarillas')) {
-        const paResults = await this.apifyScraper.scrapePaginasAmarillasEnhanced(
-          config.category,
-          config.location,
-          config.limit
-        );
-        results.paginasAmarillas = paResults.results;
+      if (cfg.sources.includes('paginasAmarillas')) {
+        const pa = await this.apifyScraper.scrapePaginasAmarillasEnhanced(cfg.category, cfg.location, cfg.limit);
+        results.paginasAmarillas = pa.results.map(x => this.normalizeLeadFromApify(x, cfg.category));
       }
 
-      // Scrape Google My Business
-      if (config.sources.includes('googleMyBusiness')) {
-        const gmbResults = await this.apifyScraper.scrapeGoogleMyBusiness(
-          config.category,
-          config.location,
-          config.limit
-        );
-        results.googleMyBusiness = gmbResults.results;
+      if (cfg.sources.includes('googleMyBusiness')) {
+        const gmb = await this.apifyScraper.scrapeGoogleMyBusiness(cfg.category, cfg.location, cfg.limit);
+        results.googleMyBusiness = gmb.results.map(x => this.normalizeLeadFromApify(x, cfg.category));
       }
 
-      // Scrape LinkedIn (si está configurado)
-      if (config.sources.includes('linkedin') && process.env.LINKEDIN_COOKIE) {
-        const linkedinResults = await this.apifyScraper.scrapeLinkedInCompanies(
-          config.category,
-          config.location,
-          Math.min(config.limit, 20) // LinkedIn es más restrictivo
-        );
-        results.linkedin = linkedinResults.results;
+      if (cfg.sources.includes('linkedin') && process.env.LINKEDIN_COOKIE) {
+        const li = await this.apifyScraper.scrapeLinkedInCompanies(cfg.category, cfg.location, Math.min(cfg.limit, 20));
+        results.linkedin = li.results.map(x => this.normalizeLeadFromApify(x, cfg.category));
       }
 
-      // Scrape PYMES.org.mx
-      if (config.sources.includes('pymesOrgMx')) {
-        const pymesResults = await this.apifyScraper.scrapePymesOrgMx(
-          config.category,
-          config.state || 'ciudad-de-mexico',  // Default to CDMX
-          config.limit
-        );
-        results.pymesOrgMx = pymesResults.results;
+      if (cfg.sources.includes('pymesOrgMx')) {
+        const state = cfg.state || 'ciudad-de-mexico';
+        const py = await this.apifyScraper.scrapePymesOrgMx(cfg.category, state, cfg.limit);
+        results.pymesOrgMx = py.results.map(x => this.normalizeLeadFromApify(x, cfg.category));
       }
 
       return {
@@ -517,18 +534,20 @@ class ScraperService {
   // PARSING METHODS
   // =============================================
 
-  parseLeads(html, source, url) {
+  parseLeads(html, source, url, category) {
     const $ = cheerio.load(html);
     const leads = [];
 
     try {
-      // Different parsing logic for each source
       switch (source) {
         case 'paginasAmarillas':
-          leads.push(...this.parsePaginasAmarillas($, url));
+          leads.push(...this.parsePaginasAmarillas($, url, category));
           break;
         case 'seccionAmarilla':
-          leads.push(...this.parseSeccionAmarilla($, url));
+          leads.push(...this.parseSeccionAmarilla($, url, category));
+          break;
+        case 'pymesOrgMx':
+          leads.push(...this.parsePymesOrgMx($, url, category)); // fallback simple
           break;
         default:
           this.logger.warn('🤷 Unknown source for parsing', { source });
@@ -546,7 +565,7 @@ class ScraperService {
     }
   }
 
-  parsePaginasAmarillas($, url) {
+  parsePaginasAmarillas($, url, category) {
     const leads = [];
     
     $('.listing-item, .business-item, .result-item').each((i, element) => {
@@ -558,14 +577,11 @@ class ScraperService {
           phone: this.extractPhone($el.find('.phone, .telefono').text()),
           address: this.cleanText($el.find('.address, .direccion').text()),
           website: $el.find('a[href*="www"], a[href*="http"]').attr('href'),
-          category: this.cleanText($el.find('.category, .categoria').text()),
+          category: category || this.cleanText($el.find('.category, .categoria').text()),
           source_url: url
         };
 
-        if (lead.company_name && (lead.phone || lead.address)) {
-          leads.push(lead);
-          this.logger.debug('Lead found', lead);
-        }
+        if (lead.company_name && (lead.phone || lead.address)) leads.push(lead);
 
       } catch (error) {
         this.logger.error('Error parsing individual lead', { error: error.message });
@@ -575,7 +591,7 @@ class ScraperService {
     return leads;
   }
 
-  parseSeccionAmarilla($, url) {
+  parseSeccionAmarilla($, url, category) {
     const leads = [];
     
     $('.empresa, .business, .listing').each((i, element) => {
@@ -587,14 +603,11 @@ class ScraperService {
           phone: this.extractPhone($el.find('.tel, .telefono, .phone').text()),
           address: this.cleanText($el.find('.dir, .direccion, .address').text()),
           website: $el.find('a[href*="www"], a[href*="http"]').attr('href'),
-          category: this.cleanText($el.find('.giro, .categoria, .category').text()),
+          category: category || this.cleanText($el.find('.giro, .categoria, .category').text()),
           source_url: url
         };
 
-        if (lead.company_name && (lead.phone || lead.address)) {
-          leads.push(lead);
-          this.logger.debug('Lead found', lead);
-        }
+        if (lead.company_name && (lead.phone || lead.address)) leads.push(lead);
 
       } catch (error) {
         this.logger.error('Error parsing individual lead', { error: error.message });
@@ -604,39 +617,69 @@ class ScraperService {
     return leads;
   }
 
+  // Fallback muy básico por si se usa sin Apify
+  parsePymesOrgMx($, url, category) {
+    const leads = [];
+    $('table tr, .pyme-list-item, .empresa-item, article.empresa').each((i, el) => {
+      const $el = $(el);
+      const name = this.cleanText($el.find('a').first().text());
+      const link = $el.find('a').first().attr('href');
+      if (name && link) {
+        leads.push({
+          company_name: name,
+          phone: null,
+          address: null,
+          website: null,
+          category,
+          source_url: new URL(link, url).href
+        });
+      }
+    });
+    return leads;
+  }
+
   // =============================================
   // UTILITY METHODS
   // =============================================
 
-    buildSearchUrl(sourceConfig, category, page) {
-    const baseUrl = sourceConfig.searchUrl;
-    const params = new URLSearchParams();
-    params.append('q', category);
-    params.append('page', page);
-
-    // Lógica específica para pymesOrgMx
-    if (sourceConfig.name === 'pymesOrgMx' && sourceConfig.states && sourceConfig.states.length > 0) {
-      // Asume que el primer estado en la lista de configuración es el predeterminado
-      params.append('state', sourceConfig.states[0]); 
-    } else {
-      // Para otras fuentes, o si pymesOrgMx no tiene estados definidos, usa 'Mexico'
-      params.append('location', 'Mexico');
+  buildSearchUrl(sourceName, sourceConfig, category, page) {
+    switch (sourceName) {
+      case 'paginasAmarillas': {
+        const baseUrl = sourceConfig.searchUrl;
+        const params = new URLSearchParams();
+        params.append('q', category);
+        params.append('page', page);
+        params.append('location', 'Mexico');
+        return `${baseUrl}/${category}/Mexico?page=${page}`;
+      }
+      case 'seccionAmarilla': {
+        const params = new URLSearchParams();
+        params.append('what', category);
+        params.append('page', page);
+        params.append('where', 'Mexico');
+        return `${sourceConfig.searchUrl}?${params.toString()}`;
+      }
+      case 'pymesOrgMx': {
+        // Página de listado: /categoria/<slug>.html?page=X
+        return `${sourceConfig.baseUrl}/categoria/${encodeURIComponent(category)}.html?page=${page}`;
+      }
+      default: {
+        const params = new URLSearchParams();
+        params.append('q', category);
+        params.append('page', page);
+        return `${sourceConfig.searchUrl}?${params.toString()}`;
+      }
     }
-
-    return `${baseUrl}?${params.toString()}`;
   }
 
   hasNextPage(html, source) {
     const $ = cheerio.load(html);
-    
-    // Look for next page indicators
     const nextPageSelectors = [
       '.next-page',
       '.pagination .next',
       'a[rel="next"]',
       '.page-nav .siguiente'
     ];
-
     return nextPageSelectors.some(selector => $(selector).length > 0);
   }
 
@@ -646,12 +689,21 @@ class ScraperService {
 
   extractPhone(text) {
     if (!text) return null;
-    
-    // Mexican phone number patterns
     const phoneRegex = /(\+52\s?)?(\d{2,3}[-\s]?\d{3,4}[-\s]?\d{4})/;
     const match = text.match(phoneRegex);
-    
     return match ? match[0].replace(/[-\s]/g, '') : null;
+  }
+
+  normalizeLeadFromApify(item, category) {
+    return {
+      company_name: item.businessName || item.companyName || item.name || null,
+      phone: item.phone || item.telefono || null,
+      email: item.email || null,
+      address: item.address || null,
+      website: item.website || null,
+      category: category || item.category || null,
+      source_url: item.sourceUrl || item.pageUrl || null
+    };
   }
 
   async delay(ms) {
@@ -664,7 +716,6 @@ class ScraperService {
 
   async saveLead(leadData, source, sessionId) {
     try {
-      // Check for duplicates
       const isDuplicate = await this.checkDuplicate(leadData.company_name, leadData.phone);
       
       if (isDuplicate) {
@@ -672,7 +723,6 @@ class ScraperService {
         return { isNew: false, reason: 'database_duplicate' };
       }
 
-      // Prepare lead for database
       const lead = {
         ...leadData,
         source,
@@ -682,8 +732,24 @@ class ScraperService {
         status: 'new'
       };
 
-      // Insert into database
       if (this.database && this.database.pool) {
+        // Crear tabla si no existe
+        await this.database.query(`
+          CREATE TABLE IF NOT EXISTS scraping_results (
+            id SERIAL PRIMARY KEY,
+            job_id VARCHAR(255),
+            source VARCHAR(50),
+            business_name TEXT,
+            phone TEXT,
+            email TEXT,
+            website TEXT,
+            address TEXT,
+            category TEXT,
+            raw_data JSONB,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+
         const result = await this.database.query(`
           INSERT INTO scraping_results (
             job_id, source, business_name, phone, email, website, address, category, raw_data
@@ -731,14 +797,12 @@ class ScraperService {
   }
 
   calculateConfidenceScore(lead) {
-    let score = 0.5; // Base score
-    
+    let score = 0.5;
     if (lead.phone) score += 0.3;
     if (lead.email) score += 0.2;
     if (lead.website) score += 0.15;
     if (lead.address) score += 0.1;
     if (lead.category) score += 0.05;
-    
     return Math.min(score, 1.0);
   }
 
@@ -750,7 +814,6 @@ class ScraperService {
     if (!this.database || !this.database.pool) return { id: sessionId };
 
     try {
-      // Create sessions table if not exists
       await this.database.query(`
         CREATE TABLE IF NOT EXISTS scraping_sessions (
           id SERIAL PRIMARY KEY,
@@ -840,7 +903,6 @@ class ScraperService {
   async stop() {
     this.logger.info('🛑 Stopping Scraper Service...');
     
-    // Stop cron jobs
     for (const [name, job] of this.cronJobs) {
       job.destroy();
       this.logger.info(`⏰ Stopped cron job: ${name}`);
@@ -849,17 +911,16 @@ class ScraperService {
     this.cronJobs.clear();
     this.isRunning = false;
     
-    // Cleanup Apify if needed
-    if (this.apifyScraper && this.apifyScraper.cleanup) {
+    if (this.apifyScraper?.cleanup) {
       await this.apifyScraper.cleanup();
     }
     
     this.logger.info('✅ Scraper Service stopped');
   }
 
-  // Method from simplified version for compatibility
-  async startScraping(config) {
-    return this.startFullScraping(config);
+  // Compat
+  async startScraping(cfg) {
+    return this.startFullScraping(cfg);
   }
 
   getAvailableScrapers() {
@@ -878,7 +939,6 @@ class ScraperService {
       }
     }
     
-    // Add Apify scrapers if enabled
     if (this.apifyScraper) {
       scrapers.push({
         id: 'googleMyBusiness',
@@ -892,7 +952,7 @@ class ScraperService {
   }
 
   async getJobStatus(jobId) {
-    if (this.redis && this.redis.getClient()) {
+    if (this.redis?.getClient) {
       const data = await this.redis.getClient().get(`session:${jobId}`);
       return data ? JSON.parse(data) : null;
     }
@@ -915,3 +975,4 @@ module.exports = {
   },
   getInstance: () => instance
 };
+
