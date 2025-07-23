@@ -67,7 +67,16 @@ async function connect() {
 
     // Inicia la conexión.
     await client.connect();
-    
+    // --- Patch compatibilidad para código legacy que usa client.setex() ---
+if (!client.setex) {
+  client.setex = (key, seconds, value) => {
+    if (typeof client.setEx === 'function') {
+      return client.setEx(key, seconds, value);
+    }
+    return client.set(key, value, { EX: seconds });
+  };
+}
+
     return client;
 
   } catch (error) {
