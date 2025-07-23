@@ -193,10 +193,16 @@ async function exists(key) {
  * @param {string | object} value - El valor a guardar.
  * @returns {Promise<boolean>} El resultado de la operación 'set'.
  */
+// Redis v4: no existe setex(). Usamos setEx() o set() con EX.
 async function setex(key, seconds, value) {
-  // Simplemente reutiliza la lógica de la función 'set'.
-  return set(key, value, seconds);
+  const client = module.exports.getClient ? module.exports.getClient() : redisClient;
+  if (typeof client.setEx === 'function') {
+    return client.setEx(key, seconds, value);
+  }
+  // fallback genérico
+  return client.set(key, value, { EX: seconds });
 }
+
 
 // Exporta todas las funciones para que puedan ser usadas en otras partes de la aplicación.
 module.exports = {
