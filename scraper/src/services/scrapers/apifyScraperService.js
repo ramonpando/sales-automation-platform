@@ -168,33 +168,32 @@ class ApifyScraperService {
           }
         },
         
-        // CORRECCIÓN CRÍTICA: Manejo defensivo de errores
-        failedRequestHandler({ request, error }) {
-          // Verificación defensiva del objeto error
-          const errorMessage = error && error.message ? error.message : 
-                              error && typeof error === 'string' ? error : 
-                              'Unknown error occurred';
-          
-          const errorDetails = {
-            url: request ? request.url : 'Unknown URL',
-            error: errorMessage,
-            timestamp: new Date().toISOString()
-          };
+        // Reemplazar el failedRequestHandler existente con esta versión mejorada
+failedRequestHandler({ request, error }) {
+  // Verificación defensiva del objeto error
+  const errorMessage = error && error.message ? error.message : 
+                      error && typeof error === 'string' ? error : 
+                      'Unknown error occurred';
+  
+  const errorDetails = {
+    url: request ? request.url : 'Unknown URL',
+    error: errorMessage,
+    timestamp: new Date().toISOString()
+  };
 
-          this.logger.error('Request failed', errorDetails);
-          
-          // Verificar que metricsService existe antes de usarlo
-          if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
-            try {
-              this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
-            } catch (metricsError) {
-              this.logger.warn('Failed to record metrics', { 
-                error: metricsError && metricsError.message ? metricsError.message : metricsError 
-              });
-            }
-          }
-        }
+  this.logger.error('Request failed', errorDetails);
+  
+  // Verificar que metricsService existe antes de usarlo
+  if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
+    try {
+      this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
+    } catch (metricsError) {
+      this.logger.warn('Failed to record metrics', { 
+        error: metricsError.message || metricsError 
       });
+    }
+  }
+}
 
       // Run the crawler
       await crawler.run(requests);
@@ -525,29 +524,32 @@ class ApifyScraperService {
           }
         },
         
-        // CORRECCIÓN: Manejo defensivo de errores
-        failedRequestHandler({ request, error }) {
-          const errorMessage = error && error.message ? error.message : 
-                              error && typeof error === 'string' ? error : 
-                              'Unknown error occurred';
-          
-          this.logger.error('Request failed', {
-            url: request ? request.url : 'Unknown URL',
-            error: errorMessage,
-            timestamp: new Date().toISOString()
-          });
-          
-          if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
-            try {
-              this.metricsService.recordRequest('scraper', 'pymes_org_mx', 'error');
-            } catch (metricsError) {
-              this.logger.warn('Failed to record metrics', { 
-                error: metricsError && metricsError.message ? metricsError.message : metricsError 
-              });
-            }
-          }
-        }
+       // Reemplazar el failedRequestHandler existente con esta versión mejorada
+failedRequestHandler({ request, error }) {
+  // Verificación defensiva del objeto error
+  const errorMessage = error && error.message ? error.message : 
+                      error && typeof error === 'string' ? error : 
+                      'Unknown error occurred';
+  
+  const errorDetails = {
+    url: request ? request.url : 'Unknown URL',
+    error: errorMessage,
+    timestamp: new Date().toISOString()
+  };
+
+  this.logger.error('Request failed', errorDetails);
+  
+  // Verificar que metricsService existe antes de usarlo
+  if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
+    try {
+      this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
+    } catch (metricsError) {
+      this.logger.warn('Failed to record metrics', { 
+        error: metricsError.message || metricsError 
       });
+    }
+  }
+}
 
       // Run the crawler
       await crawler.run(requests);
