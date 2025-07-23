@@ -3,89 +3,55 @@
 // =============================================
 const { Pool } = require('pg');
 
-// Parse DATABASE_URL or use individual env vars
-const connectionString = process.env.DATABASE_URL;
-let pool;
+function buildConnStr() {
+  // 1) Prioridad: DATABASE_URL completa
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
 
-if (connectionString) {
-  // Parse the connection string properly
-  let sslConfig = false;
-  
-  // In production, use SSL
-  if (process.env.NODE_ENV === 'production') {
-    sslConfig = {
-      rejectUnauthorized: false
-    };
-  }
-  
-  // Check if SSL is disabled in the connection string
-  if (connectionString.includes('sslmode=disable')) {
-    sslConfig = false;
-  }
-  
+  // 2) Fallback: variables sueltas tipo PGHOST/POSTGRES_HOST, etc.
+  const host = process.env.PGHOST || process.env.POSTGRES_HOST;
+  const port = process.env.PGPORT || process.env.POSTGRES_PORT || 5432;
+  const user = process.env.PGUSER || process.env.POSTGRES_USER;
+  const pass = process.env.PGPASSWORD || process.env.POSTGRES_PASSWORD;
+  const db   = process.env.PGDATABASE || process.env.POSTGRES_DB;
+
+  if (!user || !pass || !db || !host) return null;
+  return `postgresql://${user}:${pass}@${host}:${port}/${db}`;
+}
+
+const connectionString = buildConnStr();
+let pool = null;
+
+try {
+  if (!connectionString) throw new Error('No DB connection string (DATABASE_URL o vars PG*)');
+
   pool = new Pool({
-    connectionString: connectionString,
-    ssl: sslConfig,
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
+    connectionString,
+    ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   });
-} else {
-  console.error('DATABASE_URL not configured');
-  pool = null;
+} catch (e) {
+  console.error('❌ PG pool init error:', e.message);
 }
 
-// Test connection
+// Run a simple query to force connection (optional)
 async function initialize() {
-  if (!pool) {
-    console.error('Database pool not initialized');
-    return false;
-  }
-  
-  try {
-    const client = await pool.connect();
-    await client.query('SELECT NOW()');
-    client.release();
-    console.log('✅ Database connected successfully');
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
-  }
+  if (!pool) throw new Error('Pool not initialized');
+  await pool.query('SELECT 1');
+  console.log('✅ Database connection OK');
 }
 
-// Query helper (CORREGIDO)
 async function query(text, params) {
-  if (!pool) {
-    throw new Error('Database not connected');
-  }
-  
-  const start = Date.now();
-  try {
-    // Asegurarse de que params sea siempre un array, incluso si es undefined o null
-    const queryParams = params || []; 
-    const res = await pool.query(text, queryParams); 
-    const duration = Date.now() - start;
-    console.log('Executed query', { text: text.substring(0, 50), duration, rows: res.rowCount });
-    return res;
-  } catch (error) {
-    console.error('Database query error:', error.message);
-    throw error;
-  }
+  if (!pool) throw new Error('Pool not initialized');
+  return pool.query(text, params);
 }
 
-// Get pool stats
 function getPoolStats() {
-  if (!pool) return null;
-  
-  return {
+  return pool ? {
     totalCount: pool.totalCount,
     idleCount: pool.idleCount,
-    waitingCount: pool.waitingCount
-  };
+    waitingCount: pool.waitingCount,
+  } : null;
 }
 
-// Close connection
 async function close() {
   if (pool) {
     await pool.end();
@@ -98,5 +64,6 @@ module.exports = {
   query,
   close,
   pool,
-  getPoolStats
+  getPoolStats,
 };
+
