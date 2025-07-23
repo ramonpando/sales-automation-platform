@@ -363,13 +363,15 @@ router.post('/test', [
       data: result
     });
     
-  } catch (error) {
-    logger.error('Test scraping failed', error);
-    res.status(500).json({
-      error: error.message
-    });
-  }
-});
+ } catch (error) {
+  console.error('Scrape error:', error);
+  return res.status(500).json({
+    success: false,
+    error: error?.message || String(error),
+    details: error?.stack || error
+  });
+}
+
 
 // Get session details
 router.get('/session/:sessionId', async (req, res) => {
