@@ -608,15 +608,20 @@ class ScraperService {
   // UTILITY METHODS
   // =============================================
 
-  buildSearchUrl(sourceConfig, category, page) {
+    buildSearchUrl(sourceConfig, category, page) {
     const baseUrl = sourceConfig.searchUrl;
-    
-    // Build search URL with parameters
-    const params = new URLSearchParams({
-      q: category,
-      page: page,
-      location: 'Mexico'
-    });
+    const params = new URLSearchParams();
+    params.append('q', category);
+    params.append('page', page);
+
+    // Lógica específica para pymesOrgMx
+    if (sourceConfig.name === 'pymesOrgMx' && sourceConfig.states && sourceConfig.states.length > 0) {
+      // Asume que el primer estado en la lista de configuración es el predeterminado
+      params.append('state', sourceConfig.states[0]); 
+    } else {
+      // Para otras fuentes, o si pymesOrgMx no tiene estados definidos, usa 'Mexico'
+      params.append('location', 'Mexico');
+    }
 
     return `${baseUrl}?${params.toString()}`;
   }
