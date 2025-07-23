@@ -54,7 +54,7 @@ async function initialize() {
   }
 }
 
-// Query helper
+// Query helper (CORREGIDO)
 async function query(text, params) {
   if (!pool) {
     throw new Error('Database not connected');
@@ -62,7 +62,9 @@ async function query(text, params) {
   
   const start = Date.now();
   try {
-    const res = await pool.query(text, params);
+    // Asegurarse de que params sea siempre un array, incluso si es undefined o null
+    const queryParams = params || []; 
+    const res = await pool.query(text, queryParams); 
     const duration = Date.now() - start;
     console.log('Executed query', { text: text.substring(0, 50), duration, rows: res.rowCount });
     return res;
