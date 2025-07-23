@@ -93,28 +93,86 @@ class ApifyScraperService {
         maxRequestRetries: 3,
         maxConcurrency: 5,
         
-        async requestHandler({ request, $, crawler }) {
-          const timer = this.metricsService && this.metricsService.startTimer ? 
-                        this.metricsService.startTimer('paginas_amarillas_page') : null;
-          
-          try {
-            this.logger.info(`Processing page ${request.userData.page}`, {
-              url: request.url
-            });
+       // dentro del CheerioCrawler de scrapePymesOrgMx:
 
-            // Extract listings
-            const listings = [];
-            
-            $('.listado-item, .m-results-business').each((index, element) => {
-              const $item = $(element);
-              
-              const listing = {
-                businessName: this.cleanText($item.find('.comercio-title, .m-results-business--name').text()),
-                phone: this.extractPhone($item.find('.phone, .telefono').text()),
-                address: this.cleanText($item.find('.direccion, .m-results-business--address').text()),
-                category: this.cleanText($item.find('.categoria, .m-results-business--category').text()),
-                website: $item.find('a[href*="sitio-web"]').attr('href'),
-                email: this.extractEmail($item.html()),
+async requestHandler({ request, $, crawler }) {
+  const timer = this.metricsService?.startTimer
+    ? this.metricsService.startTimer('pymes_page')
+    : null;
+
+  try {
+    this.logger.info(`Processing ${request.userData.type} page`, {
+      url: request.url,
+      page: request.userData.page
+    });
+
+    if (request.userData.type === 'category') {
+      // 1) Encontrar links a fichas
+      const links = $('a[href*="/pyme/"]')
+        .map((i, el) => new URL($(el).attr('href'), request.url).href)
+        .get();
+
+      this.logger.info(`Links a fichas encontrados: ${links.length}`);
+
+      // 2) Agregar cada ficha a la cola
+      for (const link of links) {
+        if (results.length >= limit) break;
+        await crawler.addRequests([{
+          url: link,
+          userData: {
+            type: 'business',
+            category: request.userData.category,
+            state: request.userData.state
+          }
+        }]);
+      }
+
+      // 3) Paginación
+      const nextLink = $('a[rel="next"], .pagination .next, .paginacion .siguiente').attr('href');
+      if (nextLink && results.length < limit) {
+        await crawler.addRequests([{
+          url: new URL(nextLink, request.url).href,
+          userData: { ...request.userData, page: (request.userData.page || 1) + 1 }
+        }]);
+      }
+
+    } else if (request.userData.type === 'business') {
+      // Parsear la ficha
+      const business = {
+        businessName: this.cleanText($('h1').first().text()),
+        email: $('a[href^="mailto:"]').first().attr('href')?.replace('mailto:', '') ||
+               this.extractEmail($.html()),
+        phone: $('a[href^="tel:"]').first().attr('href')?.replace('tel:', '') ||
+               this.extractPhone($.text()),
+        website: this.cleanUrl($('a[href*="http"]:contains("www")').first().attr('href') ||
+                               $('[itemprop="url"]').attr('href')),
+        address: this.cleanText($('.direccion, .address, [itemprop="address"]').first().text()),
+        city: this.cleanText($('.ciudad, [itemprop="addressLocality"]').first().text()),
+        state: request.userData.state,
+        category: request.userData.category,
+        description: this.cleanText($('.descripcion, .description, [itemprop="description"]').text()).slice(0, 500),
+        source: 'pymes_org_mx',
+        sourceUrl: request.url,
+        scrapedAt: new Date().toISOString()
+      };
+
+      if (business.businessName && (business.email || business.phone || business.address)) {
+        results.push(business);
+        await Dataset.pushData([business]);
+        this.logger.debug('Lead extraído', { name: business.businessName });
+      }
+    }
+
+    if (timer) timer.end();
+    this.metricsService?.recordLeadProcessed?.('pymes_org_mx', 'found', true);
+
+  } catch (err) {
+    this.logger.error('Error processing page', { url: request.url, error: err.message });
+    if (timer) timer.end();
+    throw err;
+  }
+},
+
                 
                 // Additional data from enhanced scraping
                 rating: this.extractRating($item),
