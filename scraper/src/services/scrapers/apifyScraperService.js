@@ -1,5 +1,5 @@
 // =============================================
-// APIFY SCRAPER SERVICE - ENHANCED SCRAPING
+// APIFY SCRAPER SERVICE - ENHANCED SCRAPING (VERSIÓN CORREGIDA)
 // =============================================
 
 const { Actor } = require('apify');
@@ -7,8 +7,15 @@ const { CheerioCrawler, Dataset } = require('crawlee');
 
 class ApifyScraperService {
   constructor(logger, metricsService) {
-    this.logger = logger || console;
-    this.metricsService = metricsService;
+    // Verificación defensiva de parámetros
+    this.logger = logger || {
+      info: (...args) => console.log('[INFO]', ...args),
+      error: (...args) => console.error('[ERROR]', ...args),
+      warn: (...args) => console.warn('[WARN]', ...args),
+      debug: (...args) => console.log('[DEBUG]', ...args)
+    };
+    
+    this.metricsService = metricsService || null;
     this.isInitialized = false;
   }
 
@@ -19,6 +26,11 @@ class ApifyScraperService {
   async initialize() {
     try {
       this.logger.info('🚀 Initializing Apify Scraper Service...');
+      
+      // Verificar si Apify está disponible
+      if (!Actor) {
+        throw new Error('Apify Actor module not available');
+      }
       
       // Initialize Apify if we have a token
       if (process.env.APIFY_TOKEN) {
@@ -33,9 +45,18 @@ class ApifyScraperService {
       }
 
       this.isInitialized = true;
+      return true;
+      
     } catch (error) {
-      this.logger.error('Failed to initialize Apify', error);
-      throw error;
+      const errorMessage = error && error.message ? error.message : 'Unknown initialization error';
+      this.logger.error('Failed to initialize Apify', { 
+        error: errorMessage,
+        stack: error && error.stack ? error.stack : 'No stack trace available'
+      });
+      
+      // No lanzar el error, permitir que el servicio continúe sin Apify
+      this.isInitialized = false;
+      return false;
     }
   }
 
@@ -73,7 +94,8 @@ class ApifyScraperService {
         maxConcurrency: 5,
         
         async requestHandler({ request, $, crawler }) {
-          const timer = this.metricsService.startTimer('paginas_amarillas_page');
+          const timer = this.metricsService && this.metricsService.startTimer ? 
+                        this.metricsService.startTimer('paginas_amarillas_page') : null;
           
           try {
             this.logger.info(`Processing page ${request.userData.page}`, {
@@ -122,8 +144,10 @@ class ApifyScraperService {
             this.logger.info(`Extracted ${listings.length} listings from page ${request.userData.page}`);
             
             // Record metrics
-            timer.end();
-            this.metricsService.recordLeadProcessed('paginas_amarillas', 'found', true);
+            if (timer) timer.end();
+            if (this.metricsService && typeof this.metricsService.recordLeadProcessed === 'function') {
+              this.metricsService.recordLeadProcessed('paginas_amarillas', 'found', true);
+            }
             
             // Check for next page
             const nextPageLink = $('.pagination .next').attr('href');
@@ -137,19 +161,38 @@ class ApifyScraperService {
           } catch (error) {
             this.logger.error('Error processing page', {
               url: request.url,
-              error: error.message
+              error: error && error.message ? error.message : 'Unknown error'
             });
-            timer.end();
+            if (timer) timer.end();
             throw error;
           }
         },
         
+        // CORRECCIÓN CRÍTICA: Manejo defensivo de errores
         failedRequestHandler({ request, error }) {
-          this.logger.error('Request failed', {
-            url: request.url,
-            error: error.message
-          });
-          this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
+          // Verificación defensiva del objeto error
+          const errorMessage = error && error.message ? error.message : 
+                              error && typeof error === 'string' ? error : 
+                              'Unknown error occurred';
+          
+          const errorDetails = {
+            url: request ? request.url : 'Unknown URL',
+            error: errorMessage,
+            timestamp: new Date().toISOString()
+          };
+
+          this.logger.error('Request failed', errorDetails);
+          
+          // Verificar que metricsService existe antes de usarlo
+          if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
+            try {
+              this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
+            } catch (metricsError) {
+              this.logger.warn('Failed to record metrics', { 
+                error: metricsError && metricsError.message ? metricsError.message : metricsError 
+              });
+            }
+          }
         }
       });
 
@@ -180,8 +223,12 @@ class ApifyScraperService {
       };
 
     } catch (error) {
-      this.logger.error('Páginas Amarillas scraping failed', error);
-      throw error;
+      const errorMessage = error && error.message ? error.message : 'Unknown scraping error';
+      this.logger.error('Páginas Amarillas scraping failed', { 
+        error: errorMessage,
+        stack: error && error.stack ? error.stack : 'No stack trace'
+      });
+      throw new Error(`Scraping failed: ${errorMessage}`);
     }
   }
 
@@ -253,7 +300,8 @@ class ApifyScraperService {
       };
 
     } catch (error) {
-      this.logger.error('Google My Business scraping failed', error);
+      const errorMessage = error && error.message ? error.message : 'Unknown GMB scraping error';
+      this.logger.error('Google My Business scraping failed', { error: errorMessage });
       
       // Fallback to basic GMB scraping
       return this.basicGooglePlacesScraping(category, location, limit);
@@ -293,8 +341,9 @@ class ApifyScraperService {
       };
 
     } catch (error) {
-      this.logger.error('LinkedIn scraping failed', error);
-      throw error;
+      const errorMessage = error && error.message ? error.message : 'Unknown LinkedIn scraping error';
+      this.logger.error('LinkedIn scraping failed', { error: errorMessage });
+      throw new Error(`LinkedIn scraping failed: ${errorMessage}`);
     }
   }
   
@@ -339,7 +388,8 @@ class ApifyScraperService {
         maxConcurrency: 3, // Be respectful with the site
         
         async requestHandler({ request, $, crawler }) {
-          const timer = this.metricsService ? this.metricsService.startTimer('pymes_page') : null;
+          const timer = this.metricsService && this.metricsService.startTimer ? 
+                        this.metricsService.startTimer('pymes_page') : null;
           
           try {
             this.logger.info(`Processing ${request.userData.type} page`, {
@@ -461,27 +511,40 @@ class ApifyScraperService {
             
             // Record metrics
             if (timer) timer.end();
-            if (this.metricsService) {
+            if (this.metricsService && typeof this.metricsService.recordLeadProcessed === 'function') {
               this.metricsService.recordLeadProcessed('pymes_org_mx', 'found', true);
             }
             
           } catch (error) {
             this.logger.error('Error processing page', {
               url: request.url,
-              error: error.message
+              error: error && error.message ? error.message : 'Unknown error'
             });
             if (timer) timer.end();
             throw error;
           }
         },
         
+        // CORRECCIÓN: Manejo defensivo de errores
         failedRequestHandler({ request, error }) {
+          const errorMessage = error && error.message ? error.message : 
+                              error && typeof error === 'string' ? error : 
+                              'Unknown error occurred';
+          
           this.logger.error('Request failed', {
-            url: request.url,
-            error: error.message
+            url: request ? request.url : 'Unknown URL',
+            error: errorMessage,
+            timestamp: new Date().toISOString()
           });
-          if (this.metricsService) {
-            this.metricsService.recordRequest('scraper', 'pymes_org_mx', 'error');
+          
+          if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
+            try {
+              this.metricsService.recordRequest('scraper', 'pymes_org_mx', 'error');
+            } catch (metricsError) {
+              this.logger.warn('Failed to record metrics', { 
+                error: metricsError && metricsError.message ? metricsError.message : metricsError 
+              });
+            }
           }
         }
       });
@@ -510,8 +573,9 @@ class ApifyScraperService {
       };
 
     } catch (error) {
-      this.logger.error('PYMES.org.mx scraping failed', error);
-      throw error;
+      const errorMessage = error && error.message ? error.message : 'Unknown PYMES scraping error';
+      this.logger.error('PYMES.org.mx scraping failed', { error: errorMessage });
+      throw new Error(`PYMES scraping failed: ${errorMessage}`);
     }
   }
 
@@ -641,12 +705,13 @@ class ApifyScraperService {
       };
 
     } catch (error) {
-      this.logger.error('Basic Google Places scraping failed', error);
+      const errorMessage = error && error.message ? error.message : 'Unknown Google Places error';
+      this.logger.error('Basic Google Places scraping failed', { error: errorMessage });
       return {
         success: false,
         source: 'google_places_basic',
         results: [],
-        error: error.message
+        error: errorMessage
       };
     }
   }
@@ -660,7 +725,8 @@ class ApifyScraperService {
       await Actor.exit();
       this.logger.info('Apify scraper service cleaned up');
     } catch (error) {
-      this.logger.error('Error during cleanup', error);
+      const errorMessage = error && error.message ? error.message : 'Unknown cleanup error';
+      this.logger.error('Error during cleanup', { error: errorMessage });
     }
   }
 }
