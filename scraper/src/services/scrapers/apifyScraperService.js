@@ -346,39 +346,123 @@ failedRequestHandler({ request, error }) {
     }
   }
   
-  // =============================================
-  // PYMES.ORG.MX SCRAPER
-  // =============================================
+ // =============================================
+// PYMES.ORG.MX SCRAPER
+// =============================================
+async scrapePymesOrgMx(category, state = '', limit = 100) {
+  const startTime = Date.now();
+  const results = [];
 
-  async scrapePymesOrgMx(category, state, limit = 100) {
-    const startTime = Date.now();
-    const results = [];
-    
-    try {
-      this.logger.info('Starting PYMES.org.mx scraping with Apify', {
-        category,
-        state,
-        limit
-      });
+  try {
+    this.logger.info('Starting PYMES.org.mx scraping', { category, state, limit });
 
-      // Create request list
-      const baseUrl = 'https://pymes.org.mx';
-      const requests = [];
-      
-      // First, get the category URL
-      const categorySlug = this.slugify(category);
-      const stateSlug = this.slugify(state);
-      
-      // PYMES uses URLs like: /estado/categoria/
-      requests.push({
-        url: `${baseUrl}/${stateSlug}/${categorySlug}/`,
-        userData: { 
-          type: 'category',
-          category, 
-          state,
-          page: 1 
+    const baseUrl = 'https://pymes.org.mx';
+    const catSlug  = this.slugify(category);               // “agencias-de-anuncios-publicitarios”
+    // En PYMES el “estado” no siempre va en la URL de categoría, así que lo ignoramos aquí.
+    const firstPageUrl = `${baseUrl}/categoria/${catSlug}.html?page=1`;
+
+    const crawler = new CheerioCrawler({
+      requestHandlerTimeoutSecs: 30,
+      maxRequestRetries: 3,
+      maxConcurrency: 3,
+
+      async requestHandler({ request, $, crawler }) {
+        if (request.userData.type === 'category') {
+          this.logger.info(`Category page ${request.userData.page}`, { url: request.url });
+
+          // Extraer enlaces a fichas
+          $('table tr').each((i, tr) => {
+            const href = $(tr).find('td:first a[href*="/pyme/"]').attr('href');
+            if (!href) return;
+            if (results.length >= limit) return;
+
+            crawler.addRequests([{
+              url: new URL(href, request.url).href,
+              userData: { type: 'business', category, state }
+            }]);
+          });
+
+          // Paginación: busca “Siguiente” o rel=next
+          const nextHref = $('a:contains("Siguiente"), a[rel="next"]').attr('href');
+          if (nextHref && results.length < limit) {
+            crawler.addRequests([{
+              url: new URL(nextHref, request.url).href,
+              userData: { type: 'category', page: request.userData.page + 1, category, state }
+            }]);
+          }
+
+        } else if (request.userData.type === 'business') {
+          // Parsear ficha individual
+          const business = {
+            businessName: this.cleanText(
+              $('h1').first().text() ||
+              $('.empresa-nombre,.business-name,.titulo-empresa').first().text()
+            ),
+            phone: this.extractPhone(
+              $('a[href^="tel:"]').first().attr('href') || $('.telefono,.phone').text()
+            ),
+            email: this.extractEmail(
+              $('a[href^="mailto:"]').first().attr('href') || $('.email,.correo').html()
+            ),
+            website: this.cleanUrl(
+              $('a[href^="http"]').filter((i,el)=>$(el).text().match(/www|sitio|web|página/i)).first().attr('href')
+            ),
+            address: this.cleanText(
+              $('.direccion,.address,[itemprop="address"]').text()
+            ),
+            city: this.cleanText($('.ciudad,[itemprop="addressLocality"]').text()),
+            state: state || this.cleanText($('.estado,[itemprop="addressRegion"]').text()),
+            category,
+            description: this.cleanText($('.descripcion,.description,[itemprop="description"]').text()).substring(0,500),
+
+            source: 'pymes_org_mx',
+            sourceUrl: request.url,
+            scrapedAt: new Date().toISOString()
+          };
+
+          // Solo guardamos si hay nombre + algún dato de contacto
+          if (business.businessName && (business.phone || business.email || business.address)) {
+            results.push(business);
+            await Dataset.pushData(business);
+            this.logger.debug('Saved business', { name: business.businessName });
+          }
         }
-      });
+      },
+
+      failedRequestHandler: ({ request, error }) => {
+        this.logger.error('Request failed', {
+          url: request.url,
+          error: error?.message || error || 'unknown'
+        });
+      }
+    });
+
+    // Arranca
+    await crawler.run([{
+      url: firstPageUrl,
+      userData: { type: 'category', page: 1, category, state }
+    }]);
+
+    const duration = Date.now() - startTime;
+
+    this.logger.info('PYMES.org.mx scraping done', {
+      total: results.length, duration: `${duration}ms`
+    });
+
+    return {
+      success: true,
+      source: 'pymes_org_mx',
+      results: results.slice(0, limit),
+      metadata: { totalFound: results.length, duration, timestamp: new Date().toISOString(), category, state }
+    };
+
+  } catch (err) {
+    const msg = err?.message || 'Unknown PYMES scraping error';
+    this.logger.error('PYMES.org.mx scraping failed', { error: msg });
+    throw new Error(`PYMES scraping failed: ${msg}`);
+  }
+}
+
 
       // Create crawler
       const crawler = new CheerioCrawler({
