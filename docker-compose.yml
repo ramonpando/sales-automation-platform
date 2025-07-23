@@ -1,5 +1,5 @@
 # =============================================
-# SALES AUTOMATION PLATFORM - PRODUCTION STACK
+# SALES AUTOMATION PLATFORM - PRODUCTION STACK (VERSIÓN CORREGIDA)
 # =============================================
 version: '3.8'
 
@@ -134,7 +134,7 @@ services:
       - "traefik.http.middlewares.auth.basicauth.users=admin:$$2y$$10$$rO3RWy7V1/ZU5h2VsOJ/wu8Tx9jKLKY2HH5YNY5j/R7nGYr8mYZJ2"
 
   # =============================================
-  # SCRAPER SERVICE
+  # SCRAPER SERVICE (CORREGIDO)
   # =============================================
   scraper:
     build:
@@ -147,13 +147,28 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - DATABASE_URL=postgresql://sales_admin:${POSTGRES_PASSWORD:-SalesAuto2025!}@postgres:5432/sales_automation
+      # CORRECCIÓN CRÍTICA: URL Redis con formato correcto de autenticación
       - REDIS_URL=redis://:${REDIS_PASSWORD:-RedisSecure2025!}@redis:6379/0
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
       - SCRAPER_INTERVAL=${SCRAPER_INTERVAL:-3600}
       - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-5}
       - RATE_LIMIT_DELAY=${RATE_LIMIT_DELAY:-200}
       - ENABLE_METRICS=true
       - METRICS_PORT=9090
+      # Variables adicionales para Apify
+      - APIFY_TOKEN=${APIFY_TOKEN:-}
+      - USE_APIFY=${USE_APIFY:-false}
+      - GOOGLE_PLACES_API_KEY=${GOOGLE_PLACES_API_KEY:-}
+      - LINKEDIN_COOKIE=${LINKEDIN_COOKIE:-}
+      # Variables de configuración de scraping
+      - AUTO_START_SCRAPING=${AUTO_START_SCRAPING:-false}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-15000}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_DELAY=${RETRY_DELAY:-1000}
+      # Variables de health check
+      - HEALTH_CHECK_INTERVAL=${HEALTH_CHECK_INTERVAL:-30000}
+      - ENABLE_DETAILED_HEALTH=${ENABLE_DETAILED_HEALTH:-true}
     volumes:
       - ./scraper/logs:/app/logs
       - ./scraper/config:/app/config:ro
@@ -200,6 +215,7 @@ services:
       - NODE_ENV=production
       - PORT=3001
       - DATABASE_URL=postgresql://sales_admin:${POSTGRES_PASSWORD:-SalesAuto2025!}@postgres:5432/sales_automation
+      # CORRECCIÓN: URL Redis con formato correcto
       - REDIS_URL=redis://:${REDIS_PASSWORD:-RedisSecure2025!}@redis:6379/1
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - ENABLE_DATABASE_SAVE=${ENABLE_DATABASE_SAVE:-true}
