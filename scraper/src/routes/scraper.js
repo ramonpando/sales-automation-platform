@@ -7,6 +7,15 @@ const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 
 const router = express.Router();
+// --- Helper para responder errores de forma consistente ---
+function sendError(res, error, code = 500) {
+  console.error('Scrape error:', error);
+  return res.status(code).json({
+    success: false,
+    error: error?.message || String(error),
+    details: error?.stack || error
+  });
+}
 
 // Lazy loading of dependencies
 function getLogger() {
