@@ -64,230 +64,87 @@ class ApifyScraperService {
   // PÁGINAS AMARILLAS SCRAPER
   // =============================================
 
-  async scrapePaginasAmarillasEnhanced(category, location, limit = 100) {
-    const startTime = Date.now();
-    const results = [];
-    
-    try {
-      this.logger.info('Starting Páginas Amarillas scraping with Apify', {
-        category,
-        location,
-        limit
-      });
+ /**
+ * Enhanced scraper for Páginas Amarillas vía Apify
+ */
+async scrapePaginasAmarillasEnhanced(category, location, limit = 100) {
+  const Apify = require('apify');
+  const { Dataset, CheerioCrawler } = Apify;
 
-      // Create request list
-      const baseUrl = 'https://www.paginasamarillas.com.mx/busqueda';
-      const requests = [];
-      
-      // Generate URLs for multiple pages
-      for (let page = 1; page <= Math.ceil(limit / 20); page++) {
-        requests.push({
-          url: `${baseUrl}/${category}/${location}?page=${page}`,
-          userData: { page, category, location }
-        });
-      }
-
-      // Create crawler
-      const crawler = new CheerioCrawler({
-        requestHandlerTimeoutSecs: 30,
-        maxRequestRetries: 3,
-        maxConcurrency: 5,
-        
-       // dentro del CheerioCrawler de scrapePymesOrgMx:
-
-async requestHandler({ request, $, crawler }) {
-  const timer = this.metricsService?.startTimer
-    ? this.metricsService.startTimer('pymes_page')
-    : null;
-
-  try {
-    this.logger.info(`Processing ${request.userData.type} page`, {
-      url: request.url,
-      page: request.userData.page
-    });
-
-    if (request.userData.type === 'category') {
-      // 1) Encontrar links a fichas
-      const links = $('a[href*="/pyme/"]')
-        .map((i, el) => new URL($(el).attr('href'), request.url).href)
-        .get();
-
-      this.logger.info(`Links a fichas encontrados: ${links.length}`);
-
-      // 2) Agregar cada ficha a la cola
-      for (const link of links) {
-        if (results.length >= limit) break;
-        await crawler.addRequests([{
-          url: link,
-          userData: {
-            type: 'business',
-            category: request.userData.category,
-            state: request.userData.state
-          }
-        }]);
-      }
-
-      // 3) Paginación
-      const nextLink = $('a[rel="next"], .pagination .next, .paginacion .siguiente').attr('href');
-      if (nextLink && results.length < limit) {
-        await crawler.addRequests([{
-          url: new URL(nextLink, request.url).href,
-          userData: { ...request.userData, page: (request.userData.page || 1) + 1 }
-        }]);
-      }
-
-    } else if (request.userData.type === 'business') {
-      // Parsear la ficha
-      const business = {
-        businessName: this.cleanText($('h1').first().text()),
-        email: $('a[href^="mailto:"]').first().attr('href')?.replace('mailto:', '') ||
-               this.extractEmail($.html()),
-        phone: $('a[href^="tel:"]').first().attr('href')?.replace('tel:', '') ||
-               this.extractPhone($.text()),
-        website: this.cleanUrl($('a[href*="http"]:contains("www")').first().attr('href') ||
-                               $('[itemprop="url"]').attr('href')),
-        address: this.cleanText($('.direccion, .address, [itemprop="address"]').first().text()),
-        city: this.cleanText($('.ciudad, [itemprop="addressLocality"]').first().text()),
-        state: request.userData.state,
-        category: request.userData.category,
-        description: this.cleanText($('.descripcion, .description, [itemprop="description"]').text()).slice(0, 500),
-        source: 'pymes_org_mx',
-        sourceUrl: request.url,
-        scrapedAt: new Date().toISOString()
-      };
-
-      if (business.businessName && (business.email || business.phone || business.address)) {
-        results.push(business);
-        await Dataset.pushData([business]);
-        this.logger.debug('Lead extraído', { name: business.businessName });
-      }
-    }
-
-    if (timer) timer.end();
-    this.metricsService?.recordLeadProcessed?.('pymes_org_mx', 'found', true);
-
-  } catch (err) {
-    this.logger.error('Error processing page', { url: request.url, error: err.message });
-    if (timer) timer.end();
-    throw err;
-  }
-},
-
-                
-                // Additional data from enhanced scraping
-                rating: this.extractRating($item),
-                reviewCount: this.extractReviewCount($item),
-                businessHours: this.extractBusinessHours($item),
-                services: this.extractServices($item),
-                
-                // Metadata
-                source: 'paginas_amarillas_apify',
-                scrapedAt: new Date().toISOString(),
-                pageUrl: request.url,
-                position: index + 1,
-                page: request.userData.page
-              };
-
-              if (listing.businessName && (listing.phone || listing.address)) {
-                listings.push(listing);
-              }
-            });
-
-            // Store in Apify dataset
-            await Dataset.pushData(listings);
-            
-            // Add to results
-            results.push(...listings);
-            
-            this.logger.info(`Extracted ${listings.length} listings from page ${request.userData.page}`);
-            
-            // Record metrics
-          // Termina el timer si existe
-           // Termina el timer si existe
-if (timer) {
-  timer.end();
-}
-
-// Registra la métrica sólo si existe el método
-if (this.metricsService?.recordLeadProcessed) {
-  this.metricsService.recordLeadProcessed('pymes_org_mx', 'found', true);
-}
-
-}
-
-            }
-            
-            // Check for next page
-            const nextPageLink = $('.pagination .next').attr('href');
-            if (nextPageLink && results.length < limit) {
-              await crawler.addRequests([{
-                url: new URL(nextPageLink, request.url).href,
-                userData: { ...request.userData, page: request.userData.page + 1 }
-              }]);
-            }
-            
-          } catch (error) {
-            this.logger.error('Error processing page', {
-              url: request.url,
-              error: error && error.message ? error.message : 'Unknown error'
-            });
-            if (timer) timer.end();
-            throw error;
-          }
-        },
-        
-        // Reemplazar el failedRequestHandler existente con esta versión mejorada
-failedRequestHandler({ request, error }) {
-  // Verificación defensiva del objeto error
-  const errorMessage = error && error.message ? error.message : 
-                      error && typeof error === 'string' ? error : 
-                      'Unknown error occurred';
-  
-  const errorDetails = {
-    url: request ? request.url : 'Unknown URL',
-    error: errorMessage,
-    timestamp: new Date().toISOString()
+  // URL de inicio
+  const startUrl = {
+    url: `${config.sources.paginasAmarillas.searchUrl}/${category}/${location}`,
+    userData: { page: 1 },
   };
 
-  this.logger.error('Request failed', errorDetails);
-  
-  // Verificar que metricsService existe antes de usarlo
-  if (this.metricsService && typeof this.metricsService.recordRequest === 'function') {
-    try {
-      this.metricsService.recordRequest('scraper', 'paginas_amarillas', 'error');
-    } catch (metricsError) {
-      this.logger.warn('Failed to record metrics', { 
-        error: metricsError.message || metricsError 
-      });
-    }
+  const results = [];
+  let timer;
+
+  // Inicia métrica si está disponible
+  if (this.metricsService?.startTimer) {
+    timer = this.metricsService.startTimer('paginas_amarillas');
   }
+
+  const crawler = new CheerioCrawler({
+    maxRequestsPerCrawl: limit,
+    handlePageFunction: async ({ request, $, crawler }) => {
+      // 1) Extraemos todos los listados visibles
+      const listings = [];
+      $('.listing-item, .business-item, .result-item').each((index, el) => {
+        const $el = $(el);
+        const listing = {
+          company_name: this.cleanText($el.find('.business-name').text()),
+          phone: this.extractPhone($el.find('.phone').text()),
+          address: this.cleanText($el.find('.address').text()),
+          website: $el.find('a[href]').attr('href'),
+          category,
+          source_url: request.loadedUrl,
+          position: index + 1,
+          page: request.userData.page,
+          scrapedAt: new Date().toISOString(),
+        };
+        if (listing.company_name && (listing.phone || listing.address)) {
+          listings.push(listing);
+        }
+      });
+
+      // 2) Guardamos en Apify Dataset y en memoria
+      await Dataset.pushData(listings);
+      results.push(...listings);
+
+      // 3) Log de diagnóstico
+      this.logger.info(
+        `Extracted ${listings.length} listings from page ${request.userData.page}`
+      );
+
+      // 4) Métricas
+      if (timer) timer.end();
+      if (this.metricsService?.recordLeadProcessed) {
+        this.metricsService.recordLeadProcessed(
+          'paginas_amarillas',
+          listings.length,
+          true
+        );
+      }
+
+      // 5) Paginación manual
+      const nextLink = $('.pagination .next').attr('href');
+      if (nextLink && request.userData.page < limit) {
+        await crawler.addRequests([{
+          url: new URL(nextLink, request.loadedUrl).href,
+          userData: { page: request.userData.page + 1 },
+        }]);
+      }
+    },
+  });
+
+  // 6) Ejecutamos el crawler
+  await crawler.run([startUrl]);
+
+  // 7) Devolvemos resultados en el formato esperado
+  return { results };
 }
 
-      // Run the crawler
-      await crawler.run(requests);
-      
-      // Get all data from dataset
-      const dataset = await Dataset.open();
-      const { items } = await dataset.getData();
-      
-      const duration = Date.now() - startTime;
-      
-      this.logger.info('Páginas Amarillas scraping completed', {
-        totalResults: items.length,
-        duration: `${duration}ms`,
-        pagesProcessed: Math.ceil(items.length / 20)
-      });
-
-      return {
-        success: true,
-        source: 'paginas_amarillas_apify',
-        results: items.slice(0, limit),
-        metadata: {
-          totalFound: items.length,
-          duration,
-          timestamp: new Date().toISOString()
-        }
-      };
 
     } catch (error) {
       const errorMessage = error && error.message ? error.message : 'Unknown scraping error';
