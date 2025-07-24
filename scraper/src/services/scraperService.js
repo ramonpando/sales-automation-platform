@@ -9,12 +9,9 @@ const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 
 // Lazy load Apify scraper
-let ApifyScraperService;
-try {
-  ApifyScraperService = require('./scrapers/apifyScraperService');
-} catch (error) {
-  console.log('Apify scraper not available');
-}
+// ===== Importación forzada de la clase ApifyScraperService =====
+const ApifyScraperService = require('./scrapers/apifyScraperService');
+
 
 // =============================================
 // SCRAPER CONFIGURATION
