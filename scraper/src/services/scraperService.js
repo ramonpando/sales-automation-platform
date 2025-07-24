@@ -103,7 +103,7 @@ class ScraperService {
   async initialize() {
     try {
       this.logger.info('🕷️ Initializing Scraper Service...');
-
+      console.log('🔍 initialize() ha sido invocado');
       if (config.autoStart) {
         this.scheduleAutomaticScraping();
       }
