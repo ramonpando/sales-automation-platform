@@ -121,15 +121,20 @@ class ScraperService {
         this.logger.warn('Metrics service not available');
       }
 
-      if (process.env.USE_APIFY === 'true' && ApifyScraperService) {
-        try {
-          this.apifyScraper = new ApifyScraperService(this.logger, this.metricsService);
-          await this.apifyScraper.initialize();
-          this.logger.info('✅ Apify scraper initialized');
-        } catch (error) {
-          this.logger.error('Failed to initialize Apify scraper', error);
-        }
-      }
+     const useApify = String(process.env.USE_APIFY).toLowerCase() === 'true';
+this.log.debug(`USE_APIFY env var is '${process.env.USE_APIFY}' → useApify=${useApify}`);
+if (useApify) {
+    try {
+        this.apifyScraper = new ApifyScraperService(this.config, this.log);
+        await this.apifyScraper.initialize();
+        this.log.info('✅ Apify scraper initialized');
+    } catch (err) {
+        // Aquí volcamos el error completo para diagnosticar
+        this.log.error('❌ Failed to initialize ApifyScraperService:', err.stack || err);
+        this.apifyScraper = null;
+    }
+}
+
 
       this.logger.info('✅ Scraper Service initialized successfully', {
         autoStart: config.autoStart,
