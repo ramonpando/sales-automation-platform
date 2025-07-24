@@ -105,13 +105,12 @@ class ScraperService {
         schedule: config.scraperInterval,
         apifyEnabled: !!this.apifyScraper,
       });
-    } catch (error) {
-      this.logger.error('❌ Failed to initialize Scraper Service', {
-        message: error.message,
-        stack: error.stack,
-      });
-      throw error;
-    }
+   } catch (error) {
+  // DEBUG: vuelca el error completo por consola
+  console.error('❌ Failed to initialize Scraper Service:', error);
+  throw error;
+}
+
   }
 
   // =============================================
