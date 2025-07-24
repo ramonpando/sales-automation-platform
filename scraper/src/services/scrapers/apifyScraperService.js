@@ -202,9 +202,19 @@ async requestHandler({ request, $, crawler }) {
             this.logger.info(`Extracted ${listings.length} listings from page ${request.userData.page}`);
             
             // Record metrics
-            if (timer) timer.end();
-            if (this.metricsService && typeof this.metricsService.recordLeadProcessed === 'function') {
-              this.metricsService.recordLeadProcessed('paginas_amarillas', 'found', true);
+          // Termina el timer si existe
+           // Termina el timer si existe
+if (timer) {
+  timer.end();
+}
+
+// Registra la métrica sólo si existe el método
+if (this.metricsService?.recordLeadProcessed) {
+  this.metricsService.recordLeadProcessed('pymes_org_mx', 'found', true);
+}
+
+}
+
             }
             
             // Check for next page
