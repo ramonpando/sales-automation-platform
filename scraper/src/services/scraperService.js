@@ -8,10 +8,8 @@ const { RateLimiterMemory } = require('rate-limiter-flexible');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 
-// Lazy load Apify scraper
-// ===== Importación forzada de la clase ApifyScraperService =====
+// Importación de la clase ApifyScraperService
 const ApifyScraperService = require('./scrapers/apifyScraperService');
-
 
 // =============================================
 // SCRAPER CONFIGURATION
@@ -118,27 +116,23 @@ class ScraperService {
         this.logger.warn('Metrics service not available');
       }
 
-   // --- Parche para inicializar Apify de forma segura ---
-const useApify = String(process.env.USE_APIFY).toLowerCase() === 'true';
-// Usamos console.log porque this.log puede no estar aún inicializado
-console.log(`DEBUG: USE_APIFY='${process.env.USE_APIFY}' → useApify=${useApify}`);
+      // --- INICIO PARCHE APIFY (AISLADO EN SU PROPIO TRY/CATCH) ---
+      const useApify = String(process.env.USE_APIFY).toLowerCase() === 'true';
+      console.log(`DEBUG: USE_APIFY='${process.env.USE_APIFY}' → useApify=${useApify}`);
 
-if (useApify) {
-    try {
-        // Montamos el servicio de Apify
-        this.apifyScraper = new ApifyScraperService(this.config, this.log);
-        await this.apifyScraper.initialize();
-        this.log.info('✅ Apify scraper initialized');
-    } catch (err) {
-        // Volcamos el stack trace completo
-        console.error('❌ Failed to initialize ApifyScraperService:', err.stack || err);
-        // Dejamos el scraper en null para que el resto siga funcionando
-        this.apifyScraper = null;
-    }
-}
-// --- Fin parche Apify ---
-
-
+      if (useApify) {
+        try {
+          // Creamos e inicializamos el scraper de Apify
+          this.apifyScraper = new ApifyScraperService(config, this.logger);
+          await this.apifyScraper.initialize();
+          this.logger.info('✅ Apify scraper initialized');
+        } catch (err) {
+          // Mostramos el stack trace completo sin detener el init principal
+          console.error('❌ Failed to initialize ApifyScraperService:', err.stack || err);
+          this.apifyScraper = null;
+        }
+      }
+      // --- FIN PARCHE APIFY ---
 
       this.logger.info('✅ Scraper Service initialized successfully', {
         autoStart: config.autoStart,
@@ -260,6 +254,10 @@ if (useApify) {
       this.isRunning = false;
     }
   }
+
+
+
+}
 
   async scrapeSource(sourceName, sourceConfig, sessionId, globalOptions = {}) {
     const results = {
