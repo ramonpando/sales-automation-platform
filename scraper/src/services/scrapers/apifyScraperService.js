@@ -199,7 +199,7 @@ async requestHandler({ request, $, crawler }) {
             // Add to results
             results.push(...listings);
             
-            this.logger.info(Extracted ${listings.length} listings from page ${request.userData.page}`);
+            this.logger.info(`Extracted ${listings.length} listings from page ${request.userData.page}`);
             
             // Record metrics
             if (timer) timer.end();
