@@ -57,12 +57,22 @@ try {
 }
 
 // Load services
+// --- INICIO SAFE MODULE LOADING: SCRAPER SERVICE ---
+let scraperService;
 try {
-  scraperService = require('./services/scraperService.js');
-  logger.info('✅ Scraper service loaded');
+  // Importamos la función initialize de tu Singleton
+  const { initialize: initScraperService } = require('./services/scraperService');
+  // Creamos la instancia pasándole database, redis y logger
+  scraperService = initScraperService(database, redis, logger);
+  // ESPERAMOS a que arranque (aquí se lanza tu initialize() parcheado)
+  await scraperService.initialize();
+  logger.info('✅ Scraper Service initialized successfully');
 } catch (error) {
-  logger.error('⚠️ Scraper service failed:', error.message);
+  console.error('❌ Scraper Service failed to initialize:', error);
+  process.exit(1);  // O lo que uses para abortar el startup
 }
+// --- FIN SAFE MODULE LOADING: SCRAPER SERVICE ---
+
 
 try {
   metricsService = require('./services/metricsService.js');
@@ -106,6 +116,14 @@ try {
 } catch (error) {
   logger.error('⚠️ Admin routes failed:', error.message);
 }
+// ----------------------------------------
+// INICIALIZA SCRAPER SERVICE ANTES DE EXPRESS
+// ----------------------------------------
+const { initialize: initScraperService } = require('./src/services/scraperService');
+// 'database', 'redis' y 'logger' ya vienen cargados en tus safe modules arriba
+const scraperService = initScraperService(database, redis, logger);
+await scraperService.initialize();
+// ----------------------------------------
 
 // =============================================
 // EXPRESS SETUP
